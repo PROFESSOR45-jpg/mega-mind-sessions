@@ -1,11 +1,17 @@
 services:
   - type: web
-    name: mega-mind-sessions
+    name: mega-mind-bot
     env: node
     buildCommand: npm install
     startCommand: npm start
     envVars:
       - key: NODE_VERSION
         value: 18.17.0
-      - key: ADMIN_KEY
-        generateValue: true
+      - key: SESSION_SERVER_URL
+        value: https://mega-mind-sessions.onrender.com
+      - key: SESSION_ID
+        sync: false  # You'll set this after generating session
+      - key: OWNER_NUMBER
+        sync: false  # Your WhatsApp number with country code
+      - key: BOT_MODE
+        value: public
