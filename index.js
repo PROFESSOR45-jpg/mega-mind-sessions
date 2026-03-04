@@ -1,34 +1,433 @@
-/**
- * MEGA MIND SESSIONS - Main Export
- * Advanced authentication for WhatsApp Baileys
- */
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mega Mind Sessions - WhatsApp Authentication</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;500;700&display=swap');
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Rajdhani', sans-serif;
+            background: #0a0a0a;
+            overflow-x: hidden;
+            color: #fff;
+        }
+        
+        .font-orbitron { font-family: 'Orbitron', sans-serif; }
+        
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+        }
+        
+        .ui-layer {
+            position: relative;
+            z-index: 10;
+            min-height: 100vh;
+            pointer-events: none;
+        }
+        
+        .ui-layer > * { pointer-events: auto; }
+        
+        .glass-card {
+            background: rgba(20, 20, 30, 0.6);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        }
+        
+        .btn-3d {
+            position: relative;
+            transform-style: preserve-3d;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .btn-3d:hover {
+            transform: translateY(-4px) rotateX(5deg);
+            box-shadow: 0 20px 40px rgba(0, 255, 255, 0.3);
+        }
+        
+        .btn-3d:active {
+            transform: translateY(-1px) rotateX(2deg);
+        }
+        
+        .neon-text {
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5),
+                         0 0 20px rgba(0, 255, 255, 0.3),
+                         0 0 30px rgba(0, 255, 255, 0.2);
+        }
+        
+        .neon-border {
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.3),
+                        inset 0 0 20px rgba(0, 255, 255, 0.1);
+        }
+        
+        .page {
+            display: none;
+            opacity: 0;
+            transform: translateY(20px) rotateX(10deg);
+            transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+            transform-style: preserve-3d;
+        }
+        
+        .page.active {
+            display: flex;
+            opacity: 1;
+            transform: translateY(0) rotateX(0);
+        }
+        
+        .qr-container {
+            background: white;
+            padding: 20px;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            display: inline-block;
+        }
+        
+        .pairing-code {
+            font-family: 'Orbitron', monospace;
+            letter-spacing: 8px;
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, #00ffff, #ff00ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            filter: drop-shadow(0 0 20px rgba(0, 255, 255, 0.5));
+        }
+        
+        .loader {
+            width: 48px;
+            height: 48px;
+            border: 3px solid rgba(0, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #00ffff;
+            animation: spin 1s ease-in-out infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #00ff00;
+            box-shadow: 0 0 10px #00ff00;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        footer {
+            background: rgba(0, 0, 0, 0.8);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+        }
+        
+        .input-3d {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: all 0.3s;
+            transform-style: preserve-3d;
+        }
+        
+        .input-3d:focus {
+            outline: none;
+            border-color: #00ffff;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+            transform: translateZ(10px);
+        }
 
-const MultiFileAuthState = require('./lib/MultiFileAuthState');
-const { useEnhancedMultiFileAuthState, SessionManager } = require('./lib/enhancedAuth');
+        .connected-badge {
+            background: linear-gradient(135deg, #00ff88, #00cc66);
+            animation: glow 2s ease-in-out infinite;
+        }
 
-/**
- * Standard multi-file auth (Baileys compatible)
- */
-async function useMultiFileAuthState(folderPath = './session') {
-    const auth = new MultiFileAuthState(folderPath);
-    return await auth.init();
-}
+        @keyframes glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(0, 255, 136, 0.5); }
+            50% { box-shadow: 0 0 40px rgba(0, 255, 136, 0.8); }
+        }
+    </style>
+</head>
+<body>
 
-/**
- * Enhanced auth with export/import
- */
-async function useMegaMindAuth(folderPath = './session') {
-    return await useEnhancedMultiFileAuthState(folderPath);
-}
+    <div id="canvas-container"></div>
 
-module.exports = {
-    // Core classes
-    MultiFileAuthState,
-    SessionManager,
-    
-    // Functions
-    useMultiFileAuthState,
-    useMegaMindAuth,
-    useEnhancedMultiFileAuthState
-};
+    <div class="ui-layer flex flex-col">
+        
+        <header class="w-full p-6 flex justify-between items-center glass-card m-4 rounded-2xl max-w-7xl mx-auto">
+            <div class="flex items-center gap-4">
+                <div class="w-12 h-12 rounded-full bg-gradient-to-br from-cyan-400 to-purple-600 flex items-center justify-center shadow-lg">
+                    <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="font-orbitron text-2xl font-bold neon-text">MEGA MIND</h1>
+                    <p class="text-xs text-gray-400 tracking-widest">SESSION MANAGER</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-4">
+                <div id="connection-status" class="status-dot"></div>
+                <span id="status-text" class="text-sm text-gray-300">System Online</span>
+            </div>
+        </header>
+
+        <main class="flex-1 flex items-center justify-center p-4">
+            
+            <!-- Home Page -->
+            <div id="home-page" class="page active flex-col items-center gap-8 max-w-4xl w-full">
+                <div class="text-center space-y-4">
+                    <h2 class="font-orbitron text-5xl md:text-7xl font-bold bg-gradient-to-r from-cyan-400 via-purple-500 to-pink-500 bg-clip-text text-transparent">
+                        AUTHENTICATION
+                    </h2>
+                    <p class="text-gray-400 text-lg">Choose your connection method</p>
+                </div>
+
+                <div class="grid md:grid-cols-2 gap-8 w-full max-w-3xl">
+                    <!-- QR Code Option -->
+                    <div class="glass-card rounded-3xl p-8 flex flex-col items-center gap-6 hover:scale-105 transition-transform duration-300 cursor-pointer" onclick="startQRConnection()">
+                        <div class="w-24 h-24 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-2xl transform rotate-3 hover:rotate-6 transition-transform">
+                            <svg class="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/>
+                            </svg>
+                        </div>
+                        <div class="text-center">
+                            <h3 class="font-orbitron text-xl font-bold mb-2">QR CODE</h3>
+                            <p class="text-gray-400 text-sm">Scan with WhatsApp</p>
+                        </div>
+                        <button class="btn-3d w-full py-4 bg-gradient-to-r from-cyan-500 to-blue-600 rounded-xl font-bold text-white shadow-lg">
+                            CONNECT VIA QR
+                        </button>
+                    </div>
+
+                    <!-- Pairing Code Option -->
+                    <div class="glass-card rounded-3xl p-8 flex flex-col items-center gap-6 hover:scale-105 transition-transform duration-300 cursor-pointer" onclick="showPage('pairing-page')">
+                        <div class="w-24 h-24 rounded-2xl bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center shadow-2xl transform -rotate-3 hover:-rotate-6 transition-transform">
+                            <svg class="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/>
+                            </svg>
+                        </div>
+                        <div class="text-center">
+                            <h3 class="font-orbitron text-xl font-bold mb-2">PAIRING CODE</h3>
+                            <p class="text-gray-400 text-sm">Enter 8-digit code</p>
+                        </div>
+                        <button class="btn-3d w-full py-4 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl font-bold text-white shadow-lg">
+                            CONNECT VIA CODE
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- QR Code Page -->
+            <div id="qr-page" class="page flex-col items-center gap-8 max-w-2xl w-full">
+                <button onclick="disconnectAndGoHome()" class="absolute top-0 left-0 p-4 text-gray-400 hover:text-white transition-colors">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+                    </svg>
+                </button>
+
+                <div class="glass-card rounded-3xl p-12 flex flex-col items-center gap-8 w-full neon-border">
+                    <h2 class="font-orbitron text-3xl font-bold text-center">SCAN QR CODE</h2>
+                    
+                    <div id="qr-display" class="qr-container">
+                        <div class="loader"></div>
+                        <p class="mt-4 text-gray-600">Generating QR Code...</p>
+                    </div>
+
+                    <div id="qr-connected" class="hidden flex-col items-center gap-4">
+                        <div class="w-20 h-20 rounded-full connected-badge flex items-center justify-center">
+                            <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+                            </svg>
+                        </div>
+                        <p class="text-green-400 font-bold text-xl">Connected!</p>
+                    </div>
+
+                    <div class="text-center space-y-2">
+                        <p class="text-gray-400">Open WhatsApp > Settings > Linked Devices</p>
+                        <p class="text-sm text-cyan-400" id="qr-timer-text">Waiting for scan...</p>
+                    </div>
+
+                    <button onclick="regenerateQR()" class="btn-3d px-8 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 rounded-xl font-bold text-white">
+                        REGENERATE
+                    </button>
+                </div>
+            </div>
+
+            <!-- Pairing Code Page -->
+            <div id="pairing-page" class="page flex-col items-center gap-8 max-w-2xl w-full">
+                <button onclick="disconnectAndGoHome()" class="absolute top-0 left-0 p-4 text-gray-400 hover:text-white transition-colors">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+                    </svg>
+                </button>
+
+                <div class="glass-card rounded-3xl p-12 flex flex-col items-center gap-8 w-full neon-border">
+                    <h2 class="font-orbitron text-3xl font-bold text-center">PAIRING CODE</h2>
+
+                    <div id="pairing-step-1" class="w-full space-y-6">
+                        <p class="text-gray-400 text-center">Enter your phone number with country code</p>
+                        <div class="flex gap-2 justify-center">
+                            <span class="text-2xl self-center text-gray-500">+</span>
+                            <input type="tel" id="phone-input" placeholder="1234567890" class="input-3d w-64 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" maxlength="15">
+                        </div>
+                        <button onclick="requestPairingCode()" class="btn-3d w-full py-4 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl font-bold text-white">
+                            GET PAIRING CODE
+                        </button>
+                    </div>
+
+                    <div id="pairing-step-2" class="hidden flex-col items-center gap-6 w-full">
+                        <div class="text-center space-y-4">
+                            <p class="text-gray-400">Enter this code in WhatsApp</p>
+                            <div class="pairing-code" id="pairing-display">--------</div>
+                        </div>
+
+                        <div class="w-full p-4 bg-white/5 rounded-xl border border-white/10">
+                            <p class="text-sm text-gray-400 text-center">
+                                WhatsApp > Settings > Linked Devices > Link with phone number
+                            </p>
+                        </div>
+
+                        <div id="pairing-connected" class="hidden flex-col items-center gap-4">
+                            <div class="w-16 h-16 rounded-full connected-badge flex items-center justify-center">
+                                <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+                                </svg>
+                            </div>
+                            <p class="text-green-400 font-bold">Connected!</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Session Page -->
+            <div id="session-page" class="page flex-col items-center gap-8 max-w-4xl w-full">
+                <div class="glass-card rounded-3xl p-8 w-full">
+                    <div class="flex justify-between items-center mb-8">
+                        <div>
+                            <h2 class="font-orbitron text-3xl font-bold">ACTIVE SESSION</h2>
+                            <p id="session-user" class="text-gray-400 mt-1">Loading...</p>
+                        </div>
+                        <button onclick="disconnectSession()" class="btn-3d px-6 py-3 bg-red-500 rounded-xl font-bold text-white">
+                            DISCONNECT
+                        </button>
+                    </div>
+
+                    <div class="grid md:grid-cols-3 gap-6">
+                        <div class="glass-card rounded-xl p-6 text-center">
+                            <div class="text-3xl font-bold text-cyan-400" id="msg-count">0</div>
+                            <p class="text-gray-400 text-sm mt-2">Messages Received</p>
+                        </div>
+                        <div class="glass-card rounded-xl p-6 text-center">
+                            <div class="text-3xl font-bold text-purple-400" id="session-time">--:--</div>
+                            <p class="text-gray-400 text-sm mt-2">Session Duration</p>
+                        </div>
+                        <div class="glass-card rounded-xl p-6 text-center">
+                            <div class="text-3xl font-bold text-green-400">ONLINE</div>
+                            <p class="text-gray-400 text-sm mt-2">Status</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+
+        <footer class="w-full p-6 text-center mt-auto">
+            <p class="font-orbitron text-lg tracking-widest text-gray-400">
+                © PROFESSOR DARK TECH©
+            </p>
+            <p class="text-xs text-gray-600 mt-2">WhatsApp Session Management System</p>
+        </footer>
+    </div>
+
+    <script>
+        // Three.js Background
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        const particlesGeometry = new THREE.BufferGeometry();
+        const particlesCount = 1500;
+        const posArray = new Float32Array(particlesCount * 3);
+
+        for(let i = 0; i < particlesCount * 3; i++) {
+            posArray[i] = (Math.random() - 0.5) * 100;
+        }
+
+        particlesGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const particlesMaterial = new THREE.PointsMaterial({
+            size: 0.2,
+            color: 0x00ffff,
+            transparent: true,
+            opacity: 0.6,
+            blending: THREE.AdditiveBlending
+        });
+
+        const particlesMesh = new THREE.Points(particlesGeometry, particlesMaterial);
+        scene.add(particlesMesh);
+
+        camera.position.z = 30;
+
+        function animate() {
+            requestAnimationFrame(animate);
+            particlesMesh.rotation.y += 0.001;
+            particlesMesh.rotation.x += 0.0005;
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Socket.IO Connection
+        const socket = io();
+        let currentSessionId = null;
+        let sessionStartTime = null;
+        let messageCount = 0;
+
+        socket.on('connect', () => {
+            console.log('Connected to server');
+            document.getElementById('status-text').textContent = 'Connected';
+            document.getElementById('connection-status').style.background = '#00ff00';
+        });
+
+        socket.on('disconnect', () => {
+            document.getElementById('status-text').textContent = 'Disconnected';
+            document.getElementById('connection-status').style.background = '#ff0000';
+        });
+
+        socket.on('qr', (data) => {
+            const qrDisplay = document.getElementById('qr-display');
+            qrDisplay.innerHTML = `<img src="${data.qr}" alt="QR Code" class="rounded-lg w-64 h-64">`;
+            currentSessionId = data.sessionId;
+        });
+
+        socket.on('pairing-code', (data) => {
+            document.getElementById('pairing-step-1').classList.add('hidden');
+            document.getElementById('pairing-step-2').classList.remove('hidden');
+            document.getElementById('pairing-step-2').classList.add('flex');
+            
+            // Animate code display
+            const display = document.getElementById('pairing-display');
+            const code = data.code;
+            let i = 0;
+            const interval = setInterval(() => {
+                display.textContent = code.substring(0, i + 1) + '-'.repeat(8 - i - 1);
+                i++;
+                if(i >= 8) clearInterval(interval);
+            }, 100);
       
