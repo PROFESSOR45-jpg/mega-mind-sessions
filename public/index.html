@@ -62,6 +62,12 @@
             transform: translateY(-1px) rotateX(2deg);
         }
         
+        .btn-3d:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
         .neon-text {
             text-shadow: 0 0 10px rgba(0, 255, 255, 0.5),
                          0 0 20px rgba(0, 255, 255, 0.3),
@@ -272,7 +278,7 @@
                     </div>
 
                     <div id="devices-list" class="scroll-container grid md:grid-cols-2 gap-4">
-                        <div class="text-center text-gray-500 py-12">
+                        <div class="text-center text-gray-500 py-12 col-span-2">
                             <p>No devices connected</p>
                             <button onclick="showAddDeviceModal()" class="mt-4 text-cyan-400 hover:underline">Add your first device</button>
                         </div>
@@ -292,7 +298,6 @@
                     <h2 class="font-orbitron text-3xl font-bold text-center mb-8">ADD NEW DEVICE</h2>
 
                     <div class="grid md:grid-cols-2 gap-6">
-                        <!-- QR Option -->
                         <div onclick="startQRConnection()" class="glass-card rounded-2xl p-6 flex flex-col items-center gap-4 cursor-pointer hover:border-cyan-500 transition-colors">
                             <div class="w-16 h-16 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
                                 <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -305,7 +310,6 @@
                             </div>
                         </div>
 
-                        <!-- Pairing Code Option -->
                         <div onclick="showPairingPage()" class="glass-card rounded-2xl p-6 flex flex-col items-center gap-4 cursor-pointer hover:border-purple-500 transition-colors">
                             <div class="w-16 h-16 rounded-xl bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center">
                                 <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -372,10 +376,19 @@
 
                     <div id="pairing-step-1" class="w-full space-y-6">
                         <p class="text-gray-400 text-center">Enter your phone number with country code</p>
-                        <div class="flex gap-2 justify-center">
-                            <span class="text-2xl self-center text-gray-500">+</span>
-                            <input type="tel" id="phone-input" placeholder="1234567890" class="input-3d w-64 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" maxlength="15">
+                        <p class="text-xs text-gray-500 text-center">Example: 12345678901 (US) or 919876543210 (India)</p>
+                        <div class="flex gap-2 justify-center items-center">
+                            <span class="text-2xl text-gray-500">+</span>
+                            <input 
+                                type="tel" 
+                                id="phone-input" 
+                                placeholder="12345678901" 
+                                class="input-3d w-72 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent tracking-wider" 
+                                maxlength="15"
+                                onkeypress="return event.charCode >= 48 && event.charCode <= 57"
+                            >
                         </div>
+                        <div id="phone-error" class="hidden text-red-400 text-sm text-center"></div>
                         <button onclick="requestPairingCode()" class="btn-3d w-full py-4 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl font-bold text-white">
                             GET PAIRING CODE
                         </button>
@@ -472,368 +485,7 @@
         </footer>
     </div>
 
-    <script>
-        // Three.js Background
-        const scene = new THREE.Scene();
-        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        document.getElementById('canvas-container').appendChild(renderer.domElement);
+ 
 
-        const particlesGeometry = new THREE.BufferGeometry();
-        const particlesCount = 1500;
-        const posArray = new Float32Array(particlesCount * 3);
-
-        for(let i = 0; i < particlesCount * 3; i++) {
-            posArray[i] = (Math.random() - 0.5) * 100;
-        }
-
-        particlesGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
-        const particlesMaterial = new THREE.PointsMaterial({
-            size: 0.2,
-            color: 0x00ffff,
-            transparent: true,
-            opacity: 0.6,
-            blending: THREE.AdditiveBlending
-        });
-
-        const particlesMesh = new THREE.Points(particlesGeometry, particlesMaterial);
-        scene.add(particlesMesh);
-
-        camera.position.z = 30;
-
-        function animate() {
-            requestAnimationFrame(animate);
-            particlesMesh.rotation.y += 0.001;
-            particlesMesh.rotation.x += 0.0005;
-            renderer.render(scene, camera);
-        }
-        animate();
-
-        window.addEventListener('resize', () => {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
-
-        // Application State
-        const socket = io();
-        let currentSessionId = null;
-        let currentDevice = null;
-        const devices = new Map(); // Store all connected devices
-        let totalMessages = 0;
-
-        // Socket Event Handlers
-        socket.on('connect', () => {
-            console.log('Connected to server');
-            document.getElementById('status-text').textContent = 'Connected';
-            document.getElementById('connection-status').style.background = '#00ff00';
-            socket.emit('get-sessions');
-        });
-
-        socket.on('disconnect', () => {
-            document.getElementById('status-text').textContent = 'Disconnected';
-            document.getElementById('connection-status').style.background = '#ff0000';
-        });
-
-        socket.on('sessions-list', (sessions) => {
-            sessions.forEach(session => {
-                devices.set(session.id, session);
-            });
-            updateDevicesList();
-        });
-
-        socket.on('session-updated', (session) => {
-            devices.set(session.id, session);
-            updateDevicesList();
-        });
-
-        socket.on('session-removed', (data) => {
-            devices.delete(data.sessionId);
-            updateDevicesList();
-            if (currentSessionId === data.sessionId) {
-                showDashboard();
-            }
-        });
-
-        socket.on('qr', (data) => {
-            const qrDisplay = document.getElementById('qr-display');
-            qrDisplay.innerHTML = `<img src="${data.qr}" alt="QR Code" class="rounded-lg w-64 h-64">`;
-            currentSessionId = data.sessionId;
-            document.getElementById('qr-error').classList.add('hidden');
-        });
-
-        socket.on('qr-expired', (data) => {
-            document.getElementById('qr-timer-text').textContent = 'QR Code expired. Click regenerate.';
-        });
-
-        socket.on('pairing-code', (data) => {
-            document.getElementById('pairing-step-1').classList.add('hidden');
-            document.getElementById('pairing-step-2').classList.remove('hidden');
-            document.getElementById('pairing-step-2').classList.add('flex');
-            document.getElementById('pairing-error').classList.add('hidden');
-            
-            const display = document.getElementById('pairing-display');
-            const code = data.code;
-            
-            let i = 0;
-            display.textContent = '--------';
-            const interval = setInterval(() => {
-                if (i < code.length) {
-                    let current = display.textContent.split('');
-                    current[i] = code[i];
-                    display.textContent = current.join('');
-                    i++;
-                } else {
-                    clearInterval(interval);
-                }
-            }, 100);
-            
-            currentSessionId = data.sessionId;
-        });
-
-        socket.on('connected', (data) => {
-            currentSessionId = data.sessionId;
-            const deviceInfo = {
-                id: data.sessionId,
-                user: data.user,
-                connectedAt: new Date(),
-                messages: 0,
-                status: 'connected'
-            };
-            devices.set(data.sessionId, deviceInfo);
-            
-            // Hide modals
-            hideQRPage();
-            hidePairingPage();
-            hideAddDeviceModal();
-            
-            // Show success
-            if(document.getElementById('qr-page').classList.contains('active')) {
-                document.getElementById('qr-display').classList.add('hidden');
-                document.getElementById('qr-connected').classList.remove('hidden');
-                document.getElementById('qr-connected').classList.add('flex');
-            } else if(document.getElementById('pairing-page').classList.contains('active')) {
-                document.getElementById('pairing-display').parentElement.classList.add('hidden');
-                document.getElementById('pairing-connected').classList.remove('hidden');
-                document.getElementById('pairing-connected').classList.add('flex');
-            }
-            
-            setTimeout(() => {
-                showDashboard();
-                updateDevicesList();
-            }, 1500);
-        });
-
-        socket.on('new-message', (data) => {
-            const device = devices.get(data.sessionId);
-            if (device) {
-                device.messages = (device.messages || 0) + 1;
-                totalMessages++;
-                document.getElementById('total-messages').textContent = totalMessages;
-                
-                if (currentSessionId === data.sessionId && currentDevice) {
-                    addMessageToDetail(data.data.messages[0]);
-                }
-            }
-            updateDevicesList();
-        });
-
-        socket.on('error', (data) => {
-            console.error('Error:', data.message);
-            const errorDiv = document.getElementById('qr-error') || document.getElementById('pairing-error');
-            if (errorDiv) {
-                errorDiv.textContent = data.message;
-                errorDiv.classList.remove('hidden');
-            }
-        });
-
-        // UI Functions
-        function showPage(pageId) {
-            document.querySelectorAll('.page').forEach(page => {
-                page.classList.remove('active');
-            });
-            setTimeout(() => {
-                document.getElementById(pageId).classList.add('active');
-            }, 100);
-        }
-
-        function showDashboard() {
-            showPage('dashboard-page');
-            updateDevicesList();
-        }
-
-        function showAddDeviceModal() {
-            showPage('add-device-modal');
-        }
-
-        function hideAddDeviceModal() {
-            showDashboard();
-        }
-
-        function showQRPage() {
-            showPage('qr-page');
-        }
-
-        function hideQRPage() {
-            document.getElementById('qr-display').innerHTML = '<div class="loader"></div><p class="mt-4 text-gray-600">Generating QR Code...</p>';
-            document.getElementById('qr-display').classList.remove('hidden');
-            document.getElementById('qr-connected').classList.add('hidden');
-            document.getElementById('qr-connected').classList.remove('flex');
-            document.getElementById('qr-timer-text').textContent = 'Waiting for scan...';
-            hideAddDeviceModal();
-        }
-
-        function showPairingPage() {
-            showPage('pairing-page');
-            document.getElementById('pairing-step-1').classList.remove('hidden');
-            document.getElementById('pairing-step-2').classList.add('hidden');
-            document.getElementById('pairing-step-2').classList.remove('flex');
-            document.getElementById('pairing-connected').classList.add('hidden');
-            document.getElementById('pairing-connected').classList.remove('flex');
-            document.getElementById('phone-input').value = '';
-        }
-
-        function hidePairingPage() {
-            hideAddDeviceModal();
-        }
-
-        function startQRConnection() {
-            currentSessionId = `session-${Date.now()}`;
-            socket.emit('init-qr', { sessionId: currentSessionId });
-            showQRPage();
-        }
-
-        function regenerateQR() {
-            document.getElementById('qr-display').innerHTML = '<div class="loader"></div><p class="mt-4 text-gray-600">Generating QR Code...</p>';
-            document.getElementById('qr-display').classList.remove('hidden');
-            document.getElementById('qr-connected').classList.add('hidden');
-            document.getElementById('qr-connected').classList.remove('flex');
-            document.getElementById('qr-error').classList.add('hidden');
-            socket.emit('init-qr', { sessionId: currentSessionId });
-        }
-
-        function requestPairingCode() {
-            const phone = document.getElementById('phone-input').value.replace(/\D/g, '');
-            if(phone.length < 10) {
-                alert('Please enter a valid phone number with country code (e.g., 12345678901)');
-                return;
-            }
-            currentSessionId = `session-${Date.now()}`;
-            document.getElementById('pairing-error').classList.add('hidden');
-            socket.emit('request-pairing-code', { 
-                phoneNumber: phone, 
-                sessionId: currentSessionId 
-            });
-        }
-
-        function updateDevicesList() {
-            const container = document.getElementById('devices-list');
-            const deviceArray = Array.from(devices.values());
-            
-            document.getElementById('total-devices').textContent = deviceArray.length;
-            document.getElementById('active-devices').textContent = deviceArray.filter(d => d.status === 'connected').length;
-            
-            if (deviceArray.length === 0) {
-                container.innerHTML = `
-                    <div class="text-center text-gray-500 py-12 col-span-2">
-                        <p>No devices connected</p>
-                        <button onclick="showAddDeviceModal()" class="mt-4 text-cyan-400 hover:underline">Add your first device</button>
-                    </div>
-                `;
-                return;
-            }
-            
-            container.innerHTML = deviceArray.map(device => `
-                <div onclick="showDeviceDetail('${device.id}')" class="device-card glass-card rounded-2xl p-6 ${currentSessionId === device.id ? 'active' : ''}">
-                    <div class="flex items-center gap-4">
-                        <div class="w-14 h-14 rounded-full bg-gradient-to-br from-cyan-500 to-purple-600 flex items-center justify-center">
-                            <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
-                            </svg>
-                        </div>
-                        <div class="flex-1">
-                            <h4 class="font-bold text-lg">${device.user?.name || 'WhatsApp Device'}</h4>
-                            <p class="text-gray-400 text-sm">${device.user?.id?.split(':')[0] || 'Unknown'}</p>
-                            <div class="flex items-center gap-2 mt-1">
-                                <div class="w-2 h-2 rounded-full ${device.status === 'connected' ? 'bg-green-500' : 'bg-red-500'}"></div>
-                                <span class="text-xs ${device.status === 'connected' ? 'text-green-400' : 'text-red-400'}">
-                                    ${device.status === 'connected' ? 'Online' : 'Offline'}
-                                </span>
-                            </div>
-                        </div>
-                        <div class="text-right">
-                            <div class="text-2xl font-bold text-cyan-400">${device.messages || 0}</div>
-                            <p class="text-xs text-gray-500">msgs</p>
-                        </div>
-                    </div>
-                </div>
-            `).join('');
-        }
-
-        function showDeviceDetail(deviceId) {
-            const device = devices.get(deviceId);
-            if (!device) return;
-            
-            currentDevice = device;
-            currentSessionId = deviceId;
-            
-            document.getElementById('detail-device-name').textContent = device.user?.name || 'WhatsApp Device';
-            document.getElementById('detail-device-phone').textContent = device.user?.id?.split(':')[0] || 'Unknown';
-            document.getElementById('detail-msg-count').textContent = device.messages || 0;
-            document.getElementById('detail-message-list').innerHTML = '<p class="text-gray-500 text-center italic py-4">No recent activity...</p>';
-            
-            showPage('device-detail-page');
-            startSessionTimer();
-        }
-
-        function disconnectCurrentDevice() {
-            if (currentSessionId) {
-                socket.emit('disconnect-session', { sessionId: currentSessionId });
-            }
-            showDashboard();
-        }
-
-        function refreshDevices() {
-            socket.emit('get-sessions');
-        }
-
-        let sessionTimer = null;
-        function startSessionTimer() {
-            if (sessionTimer) clearInterval(sessionTimer);
-            const startTime = currentDevice?.connectedAt || new Date();
-            
-            sessionTimer = setInterval(() => {
-                const diff = Math.floor((new Date() - new Date(startTime)) / 1000);
-                const hours = Math.floor(diff / 3600).toString().padStart(2, '0');
-                const mins = Math.floor((diff % 3600) / 60).toString().padStart(2, '0');
-                const secs = (diff % 60).toString().padStart(2, '0');
-                document.getElementById('detail-session-time').textContent = 
-                    hours > 0 ? `${hours}:${mins}:${secs}` : `${mins}:${secs}`;
-            }, 1000);
-        }
-
-        function addMessageToDetail(message) {
-            const msgList = document.getElementById('detail-message-list');
-            if (msgList.children[0]?.textContent.includes('No recent')) {
-                msgList.innerHTML = '';
-            }
-            
-            const msgDiv = document.createElement('div');
-            msgDiv.className = 'p-3 bg-white/5 rounded-lg border border-white/10 animate-pulse';
-            msgDiv.innerHTML = `
-                <div class="flex justify-between items-start">
-                    <span class="text-cyan-400 font-bold text-sm">${message.pushName || 'Unknown'}</span>
-                    <span class="text-gray-500 text-xs">${new Date().toLocaleTimeString()}</span>
-                </div>
-                <p class="text-gray-300 text-sm mt-1">${message.message?.conversation || message.message?.extendedTextMessage?.text || 'Media message'}</p>
-            `;
-            msgList.prepend(msgDiv);
-            setTimeout(() => msgDiv.classList.remove('animate-pulse'), 1000);
-        }
-
-        // Initialize
-        showDashboard();
-    </script>
-</body>
-</html>
+        
+              
