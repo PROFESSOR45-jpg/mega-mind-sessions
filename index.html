@@ -1,492 +1,461 @@
-<!-- mega-mind-sessions/public/index.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mega Mind - WhatsApp Session Generator</title>
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <title>Mega Mind Sessions - WhatsApp Authentication</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;500;700&display=swap');
+        
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-
+        
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Rajdhani', sans-serif;
+            background: #0a0a0a;
+            overflow-x: hidden;
+            color: #fff;
+        }
+        
+        .font-orbitron {
+            font-family: 'Orbitron', sans-serif;
+        }
+        
+        /* 3D Container */
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+        }
+        
+        /* UI Overlay */
+        .ui-layer {
+            position: relative;
+            z-index: 10;
             min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
+            pointer-events: none;
         }
-
-        .container {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 20px;
-            padding: 40px;
-            max-width: 500px;
+        
+        .ui-layer > * {
+            pointer-events: auto;
+        }
+        
+        /* Glassmorphism Cards */
+        .glass-card {
+            background: rgba(20, 20, 30, 0.6);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        }
+        
+        /* 3D Button Styles */
+        .btn-3d {
+            position: relative;
+            transform-style: preserve-3d;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .btn-3d::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
             width: 100%;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            text-align: center;
+            height: 100%;
+            background: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, transparent 50%);
+            transform: translateZ(1px);
+            border-radius: inherit;
+            pointer-events: none;
         }
-
-        .logo {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-            color: #667eea;
+        
+        .btn-3d:hover {
+            transform: translateY(-4px) rotateX(5deg);
+            box-shadow: 0 20px 40px rgba(0, 255, 255, 0.3);
         }
-
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 1.8em;
+        
+        .btn-3d:active {
+            transform: translateY(-1px) rotateX(2deg);
         }
-
-        .subtitle {
-            color: #666;
-            margin-bottom: 30px;
+        
+        /* Neon Glow Effects */
+        .neon-text {
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5),
+                         0 0 20px rgba(0, 255, 255, 0.3),
+                         0 0 30px rgba(0, 255, 255, 0.2);
         }
-
-        .status-box {
-            background: #f0f0f0;
-            border-radius: 10px;
-            padding: 20px;
-            margin: 20px 0;
-            min-height: 60px;
+        
+        .neon-border {
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.3),
+                        inset 0 0 20px rgba(0, 255, 255, 0.1);
+        }
+        
+        /* Page Transitions */
+        .page {
+            display: none;
+            opacity: 0;
+            transform: translateY(20px) rotateX(10deg);
+            transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+            transform-style: preserve-3d;
+        }
+        
+        .page.active {
             display: flex;
-            align-items: center;
-            justify-content: center;
-            flex-direction: column;
+            opacity: 1;
+            transform: translateY(0) rotateX(0);
         }
-
-        .status-text {
-            color: #555;
-            font-weight: 500;
-        }
-
-        .status-connecting { color: #f39c12; }
-        .status-connected { color: #27ae60; }
-        .status-error { color: #e74c3c; }
-
+        
+        /* QR Code Container */
         .qr-container {
-            margin: 20px 0;
-            padding: 20px;
             background: white;
-            border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            display: none;
-        }
-
-        .qr-container.active {
-            display: block;
-            animation: fadeIn 0.5s ease;
-        }
-
-        .qr-code {
-            max-width: 300px;
-            width: 100%;
-            height: auto;
-            border-radius: 10px;
-        }
-
-        .pairing-section {
-            margin-top: 20px;
             padding: 20px;
-            background: #f8f9fa;
-            border-radius: 10px;
-            display: none;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
         }
-
-        .pairing-section.active {
-            display: block;
+        
+        /* Pairing Code Display */
+        .pairing-code {
+            font-family: 'Orbitron', monospace;
+            letter-spacing: 8px;
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, #00ffff, #ff00ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            filter: drop-shadow(0 0 20px rgba(0, 255, 255, 0.5));
         }
-
-        input[type="text"] {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #ddd;
-            border-radius: 8px;
-            font-size: 16px;
-            margin: 10px 0;
-            transition: border-color 0.3s;
-        }
-
-        input[type="text"]:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-
-        .btn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            padding: 15px 40px;
-            font-size: 16px;
-            border-radius: 30px;
-            cursor: pointer;
-            transition: transform 0.3s, box-shadow 0.3s;
-            font-weight: 600;
-            margin: 10px 5px;
-        }
-
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
-        }
-
-        .btn:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-            transform: none;
-        }
-
-        .btn-secondary {
-            background: #6c757d;
-        }
-
-        .session-data {
-            margin-top: 20px;
-            padding: 15px;
-            background: #d4edda;
-            border-radius: 10px;
-            color: #155724;
-            display: none;
-            word-break: break-all;
-            font-family: monospace;
-            font-size: 12px;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-
-        .session-data.active {
-            display: block;
-            animation: slideIn 0.5s ease;
-        }
-
-        .loading {
-            display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
+        
+        /* Loading Animation */
+        .loader {
+            width: 48px;
+            height: 48px;
+            border: 3px solid rgba(0, 255, 255, 0.3);
             border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin-right: 10px;
+            border-top-color: #00ffff;
+            animation: spin 1s ease-in-out infinite;
         }
-
+        
         @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+            to { transform: rotate(360deg); }
         }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: scale(0.9); }
-            to { opacity: 1; transform: scale(1); }
+        
+        /* Status Indicator */
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #00ff00;
+            box-shadow: 0 0 10px #00ff00;
+            animation: pulse 2s infinite;
         }
-
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateY(-20px); }
-            to { opacity: 1; transform: translateY(0); }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
         }
-
-        .instructions {
-            text-align: left;
-            background: #e3f2fd;
-            padding: 15px;
-            border-radius: 10px;
-            margin-top: 20px;
-            font-size: 14px;
-            color: #1565c0;
+        
+        /* Footer */
+        footer {
+            background: rgba(0, 0, 0, 0.8);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
         }
-
-        .instructions ol {
-            margin-left: 20px;
-            margin-top: 10px;
-        }
-
-        .instructions li {
-            margin: 5px 0;
-        }
-
-        .error-box {
-            background: #fee;
-            color: #c33;
-            padding: 15px;
-            border-radius: 10px;
-            margin: 10px 0;
-            display: none;
-        }
-
-        .error-box.active {
-            display: block;
-        }
-
-        .tabs {
-            display: flex;
-            justify-content: center;
-            margin-bottom: 20px;
-            gap: 10px;
-        }
-
-        .tab {
-            padding: 10px 20px;
-            background: #f0f0f0;
-            border: none;
-            border-radius: 20px;
-            cursor: pointer;
+        
+        /* Input Fields */
+        .input-3d {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.2);
             transition: all 0.3s;
+            transform-style: preserve-3d;
         }
-
-        .tab.active {
-            background: #667eea;
-            color: white;
-        }
-
-        .tab-content {
-            display: none;
-        }
-
-        .tab-content.active {
-            display: block;
-        }
-
-        .code-display {
-            font-size: 2em;
-            font-weight: bold;
-            color: #667eea;
-            letter-spacing: 5px;
-            margin: 20px 0;
-            padding: 20px;
-            background: white;
-            border-radius: 10px;
-            border: 2px dashed #667eea;
+        
+        .input-3d:focus {
+            outline: none;
+            border-color: #00ffff;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+            transform: translateZ(10px);
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="logo">🧠</div>
-        <h1>Mega Mind Session</h1>
-        <p class="subtitle">WhatsApp Bot Session Generator</p>
 
-        <div class="tabs">
-            <button class="tab active" onclick="switchTab('qr')">QR Code</button>
-            <button class="tab" onclick="switchTab('pairing')">Pairing Code</button>
-        </div>
+    <!-- 3D Background -->
+    <div id="canvas-container"></div>
 
-        <div id="status-box" class="status-box">
-            <span id="status-text" class="status-text">Click Start to generate session</span>
-        </div>
-
-        <div class="error-box" id="error-box"></div>
-
-        <!-- QR Code Tab -->
-        <div id="qr-tab" class="tab-content active">
-            <div id="qr-container" class="qr-container">
-                <img id="qr-code" class="qr-code" alt="QR Code">
-                <p style="margin-top: 15px; color: #666; font-size: 14px;">
-                    Scan with WhatsApp → Settings → Linked Devices
-                </p>
-            </div>
-        </div>
-
-        <!-- Pairing Code Tab -->
-        <div id="pairing-tab" class="tab-content">
-            <div id="pairing-section" class="pairing-section active">
-                <p style="margin-bottom: 15px; color: #666;">
-                    Enter your phone number with country code (e.g., 1234567890)
-                </p>
-                <input type="text" id="phone-number" placeholder="1234567890" maxlength="15">
-                <button class="btn" onclick="requestPairingCode()" id="pairing-btn">
-                    Get Pairing Code
-                </button>
-                <div id="code-display" class="code-display" style="display: none;"></div>
-            </div>
-        </div>
-
-        <button class="btn" id="start-btn" onclick="startSession()">
-            Start Session
-        </button>
+    <!-- UI Layer -->
+    <div class="ui-layer flex flex-col">
         
-        <button class="btn btn-secondary" id="disconnect-btn" onclick="disconnectSession()" style="display: none;">
-            Disconnect
-        </button>
+        <!-- Header -->
+        <header class="w-full p-6 flex justify-between items-center glass-card m-4 rounded-2xl max-w-7xl mx-auto">
+            <div class="flex items-center gap-4">
+                <div class="w-12 h-12 rounded-full bg-gradient-to-br from-cyan-400 to-purple-600 flex items-center justify-center shadow-lg">
+                    <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="font-orbitron text-2xl font-bold neon-text">MEGA MIND</h1>
+                    <p class="text-xs text-gray-400 tracking-widest">SESSION MANAGER</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="status-dot"></div>
+                <span class="text-sm text-gray-300">System Online</span>
+            </div>
+        </header>
 
-        <div id="session-data" class="session-data"></div>
+        <!-- Main Content Area -->
+        <main class="flex-1 flex items-center justify-center p-4">
+            
+            <!-- Home Page -->
+            <div id="home-page" class="page active flex-col items-center gap-8 max-w-4xl w-full">
+                <div class="text-center space-y-4">
+                    <h2 class="font-orbitron text-5xl md:text-7xl font-bold bg-gradient-to-r from-cyan-400 via-purple-500 to-pink-500 bg-clip-text text-transparent">
+                        AUTHENTICATION
+                    </h2>
+                    <p class="text-gray-400 text-lg">Choose your connection method</p>
+                </div>
 
-        <div class="instructions">
-            <strong>How to use:</strong>
-            <ol>
-                <li>Click "Start Session"</li>
-                <li>Choose QR Code or Pairing Code method</li>
-                <li>For QR: Scan with WhatsApp > Linked Devices</li>
-                <li>For Pairing Code: Enter phone number, get 8-digit code</li>
-                <li>Wait for "Connected" status</li>
-                <li>Copy the session data to your Mega Mind bot</li>
-            </ol>
-        </div>
+                <div class="grid md:grid-cols-2 gap-8 w-full max-w-3xl">
+                    <!-- QR Code Option -->
+                    <div class="glass-card rounded-3xl p-8 flex flex-col items-center gap-6 hover:scale-105 transition-transform duration-300 cursor-pointer" onclick="showPage('qr-page')">
+                        <div class="w-24 h-24 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-2xl transform rotate-3 hover:rotate-6 transition-transform">
+                            <svg class="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/>
+                            </svg>
+                        </div>
+                        <div class="text-center">
+                            <h3 class="font-orbitron text-xl font-bold mb-2">QR CODE</h3>
+                            <p class="text-gray-400 text-sm">Scan with WhatsApp</p>
+                        </div>
+                        <button class="btn-3d w-full py-4 bg-gradient-to-r from-cyan-500 to-blue-600 rounded-xl font-bold text-white shadow-lg">
+                            CONNECT VIA QR
+                        </button>
+                    </div>
+
+                    <!-- Pairing Code Option -->
+                    <div class="glass-card rounded-3xl p-8 flex flex-col items-center gap-6 hover:scale-105 transition-transform duration-300 cursor-pointer" onclick="showPage('pairing-page')">
+                        <div class="w-24 h-24 rounded-2xl bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center shadow-2xl transform -rotate-3 hover:-rotate-6 transition-transform">
+                            <svg class="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/>
+                            </svg>
+                        </div>
+                        <div class="text-center">
+                            <h3 class="font-orbitron text-xl font-bold mb-2">PAIRING CODE</h3>
+                            <p class="text-gray-400 text-sm">Enter 8-digit code</p>
+                        </div>
+                        <button class="btn-3d w-full py-4 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl font-bold text-white shadow-lg">
+                            CONNECT VIA CODE
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- QR Code Page -->
+            <div id="qr-page" class="page flex-col items-center gap-8 max-w-2xl w-full">
+                <button onclick="showPage('home-page')" class="absolute top-0 left-0 p-4 text-gray-400 hover:text-white transition-colors">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+                    </svg>
+                </button>
+
+                <div class="glass-card rounded-3xl p-12 flex flex-col items-center gap-8 w-full neon-border">
+                    <h2 class="font-orbitron text-3xl font-bold text-center">SCAN QR CODE</h2>
+                    
+                    <div class="qr-container" id="qr-display">
+                        <div class="loader"></div>
+                    </div>
+
+                    <div class="text-center space-y-2">
+                        <p class="text-gray-400">Open WhatsApp > Settings > Devices</p>
+                        <p class="text-sm text-cyan-400">QR code refreshes in <span id="qr-timer">60</span>s</p>
+                    </div>
+
+                    <button onclick="regenerateQR()" class="btn-3d px-8 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 rounded-xl font-bold text-white">
+                        REGENERATE
+                    </button>
+                </div>
+            </div>
+
+            <!-- Pairing Code Page -->
+            <div id="pairing-page" class="page flex-col items-center gap-8 max-w-2xl w-full">
+                <button onclick="showPage('home-page')" class="absolute top-0 left-0 p-4 text-gray-400 hover:text-white transition-colors">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+                    </svg>
+                </button>
+
+                <div class="glass-card rounded-3xl p-12 flex flex-col items-center gap-8 w-full neon-border">
+                    <h2 class="font-orbitron text-3xl font-bold text-center">PAIRING CODE</h2>
+
+                    <div class="text-center space-y-6">
+                        <div class="pairing-code" id="pairing-display">----</div>
+                        <p class="text-gray-400">Enter this code in WhatsApp</p>
+                    </div>
+
+                    <div class="w-full space-y-4">
+                        <div class="flex gap-2 justify-center">
+                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 0)">
+                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 1)">
+                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 2)">
+                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 3)">
+                            <span class="text-3xl self-center text-gray-500">-</span>
+                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 4)">
+                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 5)">
+                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 6)">
+                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 7)">
+                        </div>
+                    </div>
+
+                    <button onclick="generatePairingCode()" class="btn-3d px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl font-bold text-white">
+                        GENERATE NEW CODE
+                    </button>
+                </div>
+            </div>
+
+            <!-- Session Management Page -->
+            <div id="session-page" class="page flex-col items-center gap-8 max-w-4xl w-full">
+                <div class="glass-card rounded-3xl p-8 w-full">
+                    <div class="flex justify-between items-center mb-8">
+                        <h2 class="font-orbitron text-3xl font-bold">ACTIVE SESSIONS</h2>
+                        <button onclick="showPage('home-page')" class="btn-3d px-6 py-2 bg-red-500 rounded-lg font-bold text-white text-sm">
+                            DISCONNECT
+                        </button>
+                    </div>
+
+                    <div class="grid gap-4" id="sessions-list">
+                        <!-- Sessions will be populated here -->
+                    </div>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- Footer -->
+        <footer class="w-full p-6 text-center mt-auto">
+            <p class="font-orbitron text-lg tracking-widest text-gray-400">
+                © PROFESSOR DARK TECH©
+            </p>
+            <p class="text-xs text-gray-600 mt-2">WhatsApp Session Management System</p>
+        </footer>
     </div>
 
     <script>
-        let socket;
-        let currentSessionId;
-        let currentMethod = 'qr';
+        // Three.js Background Animation
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
 
-        function switchTab(method) {
-            currentMethod = method;
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        // Create particles
+        const particlesGeometry = new THREE.BufferGeometry();
+        const particlesCount = 1500;
+        const posArray = new Float32Array(particlesCount * 3);
+
+        for(let i = 0; i < particlesCount * 3; i++) {
+            posArray[i] = (Math.random() - 0.5) * 100;
+        }
+
+        particlesGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const particlesMaterial = new THREE.PointsMaterial({
+            size: 0.2,
+            color: 0x00ffff,
+            transparent: true,
+            opacity: 0.6,
+            blending: THREE.AdditiveBlending
+        });
+
+        const particlesMesh = new THREE.Points(particlesGeometry, particlesMaterial);
+        scene.add(particlesMesh);
+
+        // Add floating geometric shapes
+        const geometries = [];
+        const shapes = [
+            new THREE.IcosahedronGeometry(2, 0),
+            new THREE.OctahedronGeometry(2, 0),
+            new THREE.TetrahedronGeometry(2, 0)
+        ];
+
+        for(let i = 0; i < 5; i++) {
+            const geometry = shapes[Math.floor(Math.random() * shapes.length)];
+            const material = new THREE.MeshBasicMaterial({
+                color: i % 2 === 0 ? 0x00ffff : 0xff00ff,
+                wireframe: true,
+                transparent: true,
+                opacity: 0.3
+            });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(
+                (Math.random() - 0.5) * 40,
+                (Math.random() - 0.5) * 40,
+                (Math.random() - 0.5) * 40
+            );
+            mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, 0);
+            geometries.push(mesh);
+            scene.add(mesh);
+        }
+
+        camera.position.z = 30;
+
+        // Mouse interaction
+        let mouseX = 0;
+        let mouseY = 0;
+
+        document.addEventListener('mousemove', (event) => {
+            mouseX = (event.clientX / window.innerWidth) * 2 - 1;
+            mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
+        });
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+
+            particlesMesh.rotation.y += 0.001;
+            particlesMesh.rotation.x += 0.0005;
+
+            geometries.forEach((mesh, i) => {
+                mesh.rotation.x += 0.01 * (i % 2 === 0 ? 1 : -1);
+                mesh.rotation.y += 0.01;
+                mesh.position.y += Math.sin(Date.now() * 0.001 + i) * 0.02;
+            });
+
+            camera.position.x += (mouseX * 2 - camera.position.x) * 0.05;
+            camera.position.y += (mouseY * 2 - camera.position.y) * 0.05;
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // Handle resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Application Logic
+        let currentPage = 'home-page';
+        let qrTimer = null;
+
+        function showPage(pageId) {
+            document.querySelectorAll('.page').forEach(page => {
+                page.classList.remove('active');
+            });
             
-            event.target.classList.add('active');
-            document.getElementById(method + '-tab').classList.add('active');
-        }
+            setTimeout(() => {
+                document.getElementById(pageId).classList.add('active');
+            }, 100);
 
-        function generateSessionId() {
-            return 'mega-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-        }
-
-        function updateStatus(message, type = 'normal') {
-            const statusText = document.getElementById('status-text');
-            const statusBox = document.getElementById('status-box');
-            
-            statusText.innerHTML = message;
-            statusBox.className = 'status-box';
-            
-            if (type === 'connecting') statusBox.classList.add('status-connecting');
-            if (type === 'connected') statusBox.classList.add('status-connected');
-            if (type === 'error') statusBox.classList.add('status-error');
-        }
-
-        function showError(message) {
-            const errorBox = document.getElementById('error-box');
-            errorBox.textContent = message;
-            errorBox.classList.add('active');
-            setTimeout(() => errorBox.classList.remove('active'), 5000);
-        }
-
-        function startSession() {
-            currentSessionId = generateSessionId();
-            
-            // Reset UI
-            document.getElementById('qr-container').classList.remove('active');
-            document.getElementById('session-data').classList.remove('active');
-            document.getElementById('start-btn').style.display = 'none';
-            document.getElementById('disconnect-btn').style.display = 'inline-block';
-            document.getElementById('code-display').style.display = 'none';
-
-            // Connect to server
-            socket = io();
-
-            socket.on('connect', () => {
-                console.log('Connected to server');
-                socket.emit('start-session', { sessionId: currentSessionId });
-            });
-
-            socket.on('status', (data) => {
-                updateStatus(data.message, data.status);
-            });
-
-            socket.on('qr', (data) => {
-                document.getElementById('qr-code').src = data.qr;
-                document.getElementById('qr-container').classList.add('active');
-                updateStatus('Scan the QR code with WhatsApp', 'connecting');
-            });
-
-            socket.on('pairing-code', (data) => {
-                const codeDisplay = document.getElementById('code-display');
-                codeDisplay.textContent = data.code;
-                codeDisplay.style.display = 'block';
-                updateStatus(data.message, 'connecting');
-            });
-
-            socket.on('connected', (data) => {
-                updateStatus(`Connected as ${data.user.name}`, 'connected');
-                document.getElementById('qr-container').classList.remove('active');
-                document.getElementById('pairing-section').style.display = 'none';
-            });
-
-            socket.on('session-ready', (data) => {
-                const sessionData = document.getElementById('session-data');
-                sessionData.innerHTML = `
-                    <strong>✅ Session Created!</strong><br><br>
-                    <button class="btn" onclick="downloadSession()" style="margin-bottom: 10px;">
-                        Download Session File
-                    </button><br>
-                    <small>Or copy the data below:</small><br><br>
-                    ${data.sessionData}
-                `;
-                sessionData.classList.add('active');
-            });
-
-            socket.on('error', (data) => {
-                showError(data.message);
-                updateStatus('Error occurred', 'error');
-            });
-
-            socket.on('disconnected', (data) => {
-                updateStatus(data.message);
-                resetUI();
-            });
-
-            updateStatus('<span class="loading"></span>Initializing...', 'connecting');
-        }
-
-        function requestPairingCode() {
-            if (!socket) {
-                showError('Please start session first');
-                return;
-            }
-
-            const phoneNumber = document.getElementById('phone-number').value.trim();
-            if (!phoneNumber || phoneNumber.length < 10) {
-                showError('Please enter a valid phone number with country code');
-                return;
-            }
-
-            socket.emit('request-pairing-code', {
-                sessionId: currentSessionId,
-                phoneNumber: phoneNumber
-            });
-
-            document.getElementById('pairing-btn').disabled = true;
-            document.getElementById('pairing-btn').textContent = 'Generating...';
-        }
-
-        function disconnectSession() {
-            if (socket) {
-                socket.emit('disconnect-session', { sessionId: currentSessionId });
-                socket.disconnect();
-            }
-            resetUI();
-        }
-
-        function resetUI() {
-            document.getElementById('start-btn').style.display = 'inline-block';
-            document.getElementById('disconnect-btn').style.display = 'none';
-            document.getElementById('qr-container').classList.remove('active');
-            document.getElementById('session-data').classList.remove('active');
-            document.getElementById('pairing-section').style.display = 'block';
-            document.getElementById('pairing-btn').disabled = false;
-            document.getElementById('pairing-btn').textContent = 'Get Pairing Code';
-            document.getElementById('code-display').style.display = 'none';
-            document.getElementById('phone-number').value = '';
-        }
-
-        function downloadSession() {
-            if (currentSessionId) {
-                window.location.href = `/download/${currentSessionId}`;
-            }
-        }
-
-        // Cleanup on page unload
-        window.onbeforeunload = () => {
-            if (socket) {
-                socket.disconnect();
-            }
-        };
-    </script>
-</body>
-</html>
+  
