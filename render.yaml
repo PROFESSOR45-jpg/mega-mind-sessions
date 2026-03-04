@@ -1,7 +1,7 @@
 services:
   - type: web
     name: mega-mind-sessions
-    env: node
+    runtime: node
     buildCommand: npm install
     startCommand: npm start
     envVars:
@@ -9,3 +9,7 @@ services:
         value: 18.17.0
       - key: ADMIN_KEY
         generateValue: true
+    disk:
+      name: sessions
+      mountPath: /opt/render/project/src/sessions
+      sizeGB: 1
