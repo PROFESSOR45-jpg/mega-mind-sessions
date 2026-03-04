@@ -1,24 +1,18 @@
 {
   "name": "mega-mind-sessions",
-  "version": "2.0.0",
-  "description": "Mega Mind WhatsApp Bot Session Generator",
-  "main": "index.js",
+  "version": "1.0.0",
+  "description": "WhatsApp Session Manager with 3D UI",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.18",
-    "@hapi/boom": "^10.0.1",
     "express": "^4.18.2",
+    "ws": "^8.14.2",
     "qrcode": "^1.5.3",
-    "socket.io": "^4.7.2",
-    "pino": "^8.16.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
+    "node-fetch": "^3.3.2"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.0.0"
   }
 }
