@@ -23,7 +23,7 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3000;
-const SESSIONS_DIR = './sessions';
+const SESSIONS_DIR = path.join(__dirname, 'sessions');
 
 // Ensure sessions directory exists
 fs.ensureDirSync(SESSIONS_DIR);
@@ -31,8 +31,8 @@ fs.ensureDirSync(SESSIONS_DIR);
 // Store active sockets
 const activeSockets = new Map();
 
-// Serve static files
-app.use(express.static('public'));
+// Serve static files from public folder
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Get all sessions
 app.get('/api/sessions', async (req, res) => {
@@ -57,147 +57,165 @@ io.on('connection', (socket) => {
 
     // Initialize WhatsApp connection with QR
     socket.on('init-qr', async (data) => {
-        const { sessionId } = data;
-        currentSessionId = sessionId;
-        const sessionPath = path.join(SESSIONS_DIR, sessionId);
-        
-        await fs.ensureDir(sessionPath);
-        
-        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-        const { version } = await fetchLatestBaileysVersion();
-        
-        const sock = makeWASocket({
-            version,
-            auth: state,
-            logger: P({ level: 'silent' }),
-            printQRInTerminal: false,
-            browser: ['Chrome (Linux)', '', '']
-        });
+        try {
+            const { sessionId } = data;
+            currentSessionId = sessionId;
+            const sessionPath = path.join(SESSIONS_DIR, sessionId);
+            
+            await fs.ensureDir(sessionPath);
+            
+            const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+            const { version } = await fetchLatestBaileysVersion();
+            
+            const sock = makeWASocket({
+                version,
+                auth: state,
+                logger: P({ level: 'silent' }),
+                printQRInTerminal: false,
+                browser: ['Chrome (Linux)', '', '']
+            });
 
-        currentSocket = sock;
-        activeSockets.set(sessionId, { socket: sock, connectedAt: new Date() });
+            currentSocket = sock;
+            activeSockets.set(sessionId, { socket: sock, connectedAt: new Date() });
 
-        // Save credentials when updated
-        sock.ev.on('creds.update', saveCreds);
+            // Save credentials when updated
+            sock.ev.on('creds.update', saveCreds);
 
-        // Connection updates
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+            // Connection updates
+            sock.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect, qr } = update;
 
-            // Send QR code to frontend
-            if (qr) {
-                try {
-                    const qrDataUrl = await QRCode.toDataURL(qr);
-                    socket.emit('qr', { qr: qrDataUrl, sessionId });
-                } catch (err) {
-                    console.error('QR generation error:', err);
+                // Send QR code to frontend
+                if (qr) {
+                    try {
+                        const qrDataUrl = await QRCode.toDataURL(qr);
+                        socket.emit('qr', { qr: qrDataUrl, sessionId });
+                    } catch (err) {
+                        console.error('QR generation error:', err);
+                    }
                 }
-            }
 
-            // Connection established
-            if (connection === 'open') {
-                console.log(`Session ${sessionId} connected`);
-                socket.emit('connected', { 
-                    sessionId, 
-                    user: sock.user,
-                    message: 'Successfully connected to WhatsApp!'
-                });
-            }
-
-            // Connection closed
-            if (connection === 'close') {
-                const lastError = lastDisconnect?.error;
-                const statusCode = lastError?.output?.statusCode;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                
-                if (shouldReconnect) {
-                    socket.emit('reconnecting', { sessionId, message: 'Reconnecting...' });
-                } else {
-                    socket.emit('disconnected', { sessionId, message: 'Logged out' });
-                    activeSockets.delete(sessionId);
-                    await fs.remove(sessionPath);
+                // Connection established
+                if (connection === 'open') {
+                    console.log(`Session ${sessionId} connected`);
+                    socket.emit('connected', { 
+                        sessionId, 
+                        user: sock.user,
+                        message: 'Successfully connected to WhatsApp!'
+                    });
                 }
-            }
-        });
 
-        // Handle messages
-        sock.ev.on('messages.upsert', async (m) => {
-            console.log('New message:', m);
-        });
+                // Connection closed
+                if (connection === 'close') {
+                    const lastError = lastDisconnect?.error;
+                    const statusCode = lastError?.output?.statusCode;
+                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                    
+                    if (shouldReconnect) {
+                        socket.emit('reconnecting', { sessionId, message: 'Reconnecting...' });
+                    } else {
+                        socket.emit('disconnected', { sessionId, message: 'Logged out' });
+                        activeSockets.delete(sessionId);
+                        await fs.remove(sessionPath);
+                    }
+                }
+            });
+
+            // Handle messages
+            sock.ev.on('messages.upsert', async (m) => {
+                console.log('New message received');
+                socket.emit('new-message', { sessionId, data: m });
+            });
+        } catch (error) {
+            console.error('QR Init error:', error);
+            socket.emit('error', { message: 'Failed to initialize QR: ' + error.message });
+        }
     });
 
     // Request pairing code
     socket.on('request-pairing-code', async (data) => {
-        const { phoneNumber, sessionId } = data;
-        currentSessionId = sessionId;
-        const sessionPath = path.join(SESSIONS_DIR, sessionId);
-        
-        await fs.ensureDir(sessionPath);
-        
-        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-        const { version } = await fetchLatestBaileysVersion();
-        
-        const sock = makeWASocket({
-            version,
-            auth: state,
-            logger: P({ level: 'silent' }),
-            printQRInTerminal: false,
-            browser: ['Chrome (Linux)', '', '']
-        });
+        try {
+            const { phoneNumber, sessionId } = data;
+            currentSessionId = sessionId;
+            const sessionPath = path.join(SESSIONS_DIR, sessionId);
+            
+            await fs.ensureDir(sessionPath);
+            
+            const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+            const { version } = await fetchLatestBaileysVersion();
+            
+            const sock = makeWASocket({
+                version,
+                auth: state,
+                logger: P({ level: 'silent' }),
+                printQRInTerminal: false,
+                browser: ['Chrome (Linux)', '', '']
+            });
 
-        currentSocket = sock;
-        activeSockets.set(sessionId, { socket: sock, connectedAt: new Date() });
+            currentSocket = sock;
+            activeSockets.set(sessionId, { socket: sock, connectedAt: new Date() });
 
-        sock.ev.on('creds.update', saveCreds);
+            sock.ev.on('creds.update', saveCreds);
 
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
+            let pairingCodeRequested = false;
 
-            // Wait for connecting state then request pairing code
-            if (connection === 'connecting' || connection === undefined) {
-                try {
-                    // Format phone number (remove + if present)
-                    const cleanNumber = phoneNumber.replace(/\D/g, '');
-                    const code = await sock.requestPairingCode(cleanNumber);
-                    socket.emit('pairing-code', { code, sessionId });
-                } catch (err) {
-                    console.error('Pairing code error:', err);
-                    socket.emit('error', { message: 'Failed to get pairing code. Try QR method instead.' });
+            sock.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect } = update;
+
+                // Request pairing code when connecting
+                if (!pairingCodeRequested && (connection === 'connecting' || !connection)) {
+                    try {
+                        pairingCodeRequested = true;
+                        // Format phone number (remove + if present)
+                        const cleanNumber = phoneNumber.replace(/\D/g, '');
+                        const code = await sock.requestPairingCode(cleanNumber);
+                        socket.emit('pairing-code', { code, sessionId });
+                    } catch (err) {
+                        console.error('Pairing code error:', err);
+                        socket.emit('error', { message: 'Failed to get pairing code. Try QR method instead.' });
+                    }
                 }
-            }
 
-            if (connection === 'open') {
-                socket.emit('connected', { 
-                    sessionId, 
-                    user: sock.user,
-                    message: 'Successfully connected to WhatsApp!'
-                });
-            }
-
-            if (connection === 'close') {
-                const lastError = lastDisconnect?.error;
-                const statusCode = lastError?.output?.statusCode;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                
-                if (!shouldReconnect) {
-                    activeSockets.delete(sessionId);
-                    await fs.remove(sessionPath);
+                if (connection === 'open') {
+                    socket.emit('connected', { 
+                        sessionId, 
+                        user: sock.user,
+                        message: 'Successfully connected to WhatsApp!'
+                    });
                 }
-            }
-        });
+
+                if (connection === 'close') {
+                    const lastError = lastDisconnect?.error;
+                    const statusCode = lastError?.output?.statusCode;
+                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                    
+                    if (!shouldReconnect) {
+                        activeSockets.delete(sessionId);
+                        await fs.remove(sessionPath);
+                    }
+                }
+            });
+        } catch (error) {
+            console.error('Pairing code error:', error);
+            socket.emit('error', { message: 'Failed to request pairing code: ' + error.message });
+        }
     });
 
     // Disconnect session
     socket.on('disconnect-session', async (data) => {
-        const { sessionId } = data;
-        if (activeSockets.has(sessionId)) {
-            const { socket: sock } = activeSockets.get(sessionId);
-            await sock.logout();
-            activeSockets.delete(sessionId);
+        try {
+            const { sessionId } = data;
+            if (activeSockets.has(sessionId)) {
+                const { socket: sock } = activeSockets.get(sessionId);
+                await sock.logout();
+                activeSockets.delete(sessionId);
+            }
+            const sessionPath = path.join(SESSIONS_DIR, sessionId);
+            await fs.remove(sessionPath);
+            socket.emit('disconnected', { sessionId });
+        } catch (error) {
+            console.error('Disconnect error:', error);
         }
-        const sessionPath = path.join(SESSIONS_DIR, sessionId);
-        await fs.remove(sessionPath);
-        socket.emit('disconnected', { sessionId });
     });
 
     // Client disconnect
