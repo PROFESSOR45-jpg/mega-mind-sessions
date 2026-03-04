@@ -1,10 +1,11 @@
+<!-- mega-mind-sessions/public/index.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MEGA MIND | 3D Session Generator</title>
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;500;700&display=swap" rel="stylesheet">
+    <title>Mega Mind - WhatsApp Session Generator</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -12,660 +13,480 @@
             box-sizing: border-box;
         }
 
-        :root {
-            --primary: #00d4ff;
-            --secondary: #ff00ff;
-            --accent: #00ff88;
-            --dark: #0a0a0a;
-            --glass: rgba(255, 255, 255, 0.05);
-            --glass-border: rgba(255, 255, 255, 0.1);
-        }
-
         body {
-            font-family: 'Rajdhani', sans-serif;
-            background: var(--dark);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            overflow-x: hidden;
-            color: #fff;
-            perspective: 1000px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
         }
 
-        .bg-animation {
-            position: fixed;
-            top: 0;
-            left: 0;
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 500px;
             width: 100%;
-            height: 100%;
-            z-index: -1;
-            background: 
-                radial-gradient(ellipse at 20% 80%, rgba(0, 212, 255, 0.15) 0%, transparent 50%),
-                radial-gradient(ellipse at 80% 20%, rgba(255, 0, 255, 0.15) 0%, transparent 50%),
-                radial-gradient(ellipse at 50% 50%, rgba(0, 255, 136, 0.05) 0%, transparent 70%),
-                linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 50%, #0a0a0a 100%);
-        }
-
-        .particles {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -1;
-            overflow: hidden;
-        }
-
-        .particle {
-            position: absolute;
-            width: 4px;
-            height: 4px;
-            background: var(--primary);
-            border-radius: 50%;
-            animation: float 15s infinite;
-            opacity: 0.6;
-            box-shadow: 0 0 10px var(--primary);
-        }
-
-        @keyframes float {
-            0%, 100% { transform: translateY(100vh) rotate(0deg); opacity: 0; }
-            10% { opacity: 0.6; }
-            90% { opacity: 0.6; }
-            100% { transform: translateY(-100vh) rotate(720deg); opacity: 0; }
-        }
-
-        .container-3d {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 40px 20px;
-            transform-style: preserve-3d;
-        }
-
-        .header {
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             text-align: center;
-            margin-bottom: 60px;
-            transform: translateZ(50px);
         }
 
         .logo {
-            font-family: 'Orbitron', sans-serif;
-            font-size: clamp(2.5rem, 8vw, 5rem);
-            font-weight: 900;
-            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 50%, var(--accent) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            text-shadow: 0 0 30px rgba(0, 212, 255, 0.5);
-            letter-spacing: 4px;
-            animation: glow 3s ease-in-out infinite alternate;
-            position: relative;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            color: #667eea;
         }
 
-        .logo::after {
-            content: 'MEGA MIND';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 50%, var(--accent) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            filter: blur(20px);
-            opacity: 0.5;
-            z-index: -1;
-        }
-
-        @keyframes glow {
-            from { filter: drop-shadow(0 0 20px rgba(0, 212, 255, 0.8)); }
-            to { filter: drop-shadow(0 0 40px rgba(255, 0, 255, 0.8)); }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 1.8em;
         }
 
         .subtitle {
-            font-size: 1.2rem;
-            color: rgba(255, 255, 255, 0.7);
-            margin-top: 10px;
-            letter-spacing: 8px;
-            text-transform: uppercase;
-            font-weight: 300;
+            color: #666;
+            margin-bottom: 30px;
         }
 
-        .cards-container {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-            gap: 40px;
-            margin-bottom: 60px;
-            transform-style: preserve-3d;
-        }
-
-        .glass-card {
-            background: var(--glass);
-            backdrop-filter: blur(20px);
-            border: 1px solid var(--glass-border);
-            border-radius: 30px;
-            padding: 40px;
-            position: relative;
-            transform-style: preserve-3d;
-            transition: all 0.5s cubic-bezier(0.23, 1, 0.32, 1);
-            box-shadow: 
-                0 20px 40px rgba(0, 0, 0, 0.3),
-                inset 0 1px 0 rgba(255, 255, 255, 0.1);
-        }
-
-        .glass-card::before {
-            content: '';
-            position: absolute;
-            inset: 0;
-            border-radius: 30px;
-            padding: 2px;
-            background: linear-gradient(135deg, rgba(0, 212, 255, 0.3), rgba(255, 0, 255, 0.3), rgba(0, 255, 136, 0.3));
-            -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-            mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-            -webkit-mask-composite: xor;
-            mask-composite: exclude;
-            opacity: 0;
-            transition: opacity 0.5s;
-        }
-
-        .glass-card:hover::before {
-            opacity: 1;
-        }
-
-        .glass-card:hover {
-            transform: translateY(-10px) translateZ(30px) rotateX(5deg);
-            box-shadow: 
-                0 30px 60px rgba(0, 212, 255, 0.2),
-                inset 0 1px 0 rgba(255, 255, 255, 0.2);
-        }
-
-        .card-icon {
-            width: 80px;
-            height: 80px;
-            margin: 0 auto 30px;
-            background: linear-gradient(135deg, var(--accent) 0%, #00cc6a 100%);
-            border-radius: 20px;
+        .status-box {
+            background: #f0f0f0;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            min-height: 60px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 2.5rem;
-            transform: translateZ(20px);
-            box-shadow: 0 10px 30px rgba(0, 255, 136, 0.3);
-            animation: iconFloat 3s ease-in-out infinite;
+            flex-direction: column;
         }
 
-        @keyframes iconFloat {
-            0%, 100% { transform: translateZ(20px) translateY(0); }
-            50% { transform: translateZ(20px) translateY(-10px); }
+        .status-text {
+            color: #555;
+            font-weight: 500;
         }
 
-        .card-title {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.8rem;
-            text-align: center;
-            margin-bottom: 15px;
-            background: linear-gradient(135deg, #fff 0%, rgba(255, 255, 255, 0.7) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .card-desc {
-            text-align: center;
-            color: rgba(255, 255, 255, 0.6);
-            margin-bottom: 30px;
-            line-height: 1.6;
-            font-size: 1rem;
-        }
-
-        .btn-3d {
-            width: 100%;
-            padding: 18px 30px;
-            border: none;
-            border-radius: 15px;
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.1rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-            cursor: pointer;
-            position: relative;
-            transform-style: preserve-3d;
-            transition: all 0.3s;
-            overflow: hidden;
-        }
-
-        .btn-pair {
-            background: linear-gradient(135deg, var(--accent) 0%, #00cc6a 100%);
-            color: #000;
-            box-shadow: 
-                0 10px 30px rgba(0, 255, 136, 0.3),
-                inset 0 1px 0 rgba(255, 255, 255, 0.3);
-        }
-
-        .btn-qr {
-            background: linear-gradient(135deg, var(--primary) 0%, #0099cc 100%);
-            color: #000;
-            box-shadow: 
-                0 10px 30px rgba(0, 212, 255, 0.3),
-                inset 0 1px 0 rgba(255, 255, 255, 0.3);
-        }
-
-        .btn-3d::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: -100%;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
-            transition: 0.5s;
-        }
-
-        .btn-3d:hover::before {
-            left: 100%;
-        }
-
-        .btn-3d:hover {
-            transform: translateY(-3px) translateZ(10px);
-            box-shadow: 
-                0 20px 40px rgba(0, 212, 255, 0.4),
-                inset 0 1px 0 rgba(255, 255, 255, 0.4);
-        }
-
-        .btn-3d:active {
-            transform: translateY(0) translateZ(5px);
-        }
-
-        .display-area {
-            background: var(--glass);
-            backdrop-filter: blur(20px);
-            border: 1px solid var(--glass-border);
-            border-radius: 30px;
-            padding: 40px;
-            margin-top: 40px;
-            min-height: 400px;
-            display: none;
-            transform-style: preserve-3d;
-            animation: slideUp 0.6s cubic-bezier(0.23, 1, 0.32, 1);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .display-area.active {
-            display: block;
-        }
-
-        @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(50px) rotateX(10deg);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0) rotateX(0);
-            }
-        }
-
-        .display-area::after {
-            content: '';
-            position: absolute;
-            top: -50%;
-            left: -50%;
-            width: 200%;
-            height: 200%;
-            background: conic-gradient(
-                from 0deg,
-                transparent 0deg,
-                rgba(0, 212, 255, 0.1) 60deg,
-                transparent 120deg
-            );
-            animation: rotate 10s linear infinite;
-        }
-
-        @keyframes rotate {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
-        }
-
-        .display-content {
-            position: relative;
-            z-index: 1;
-        }
-
-        .input-group {
-            margin-bottom: 30px;
-        }
-
-        .input-label {
-            display: block;
-            margin-bottom: 10px;
-            color: var(--primary);
-            font-weight: 600;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-            font-size: 0.9rem;
-        }
-
-        .input-3d {
-            width: 100%;
-            padding: 18px 25px;
-            border: 2px solid var(--glass-border);
-            border-radius: 15px;
-            background: rgba(0, 0, 0, 0.3);
-            color: #fff;
-            font-size: 1.2rem;
-            font-family: 'Rajdhani', sans-serif;
-            transition: all 0.3s;
-            outline: none;
-        }
-
-        .input-3d:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
-            transform: translateY(-2px);
-        }
-
-        .input-3d::placeholder {
-            color: rgba(255, 255, 255, 0.3);
-        }
-
-        .code-display {
-            background: rgba(0, 0, 0, 0.5);
-            border: 2px solid var(--accent);
-            border-radius: 20px;
-            padding: 30px;
-            text-align: center;
-            margin: 30px 0;
-            position: relative;
-            overflow: hidden;
-            box-shadow: 0 0 30px rgba(0, 255, 136, 0.2);
-        }
-
-        .code-display::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 2px;
-            background: linear-gradient(90deg, transparent, var(--accent), transparent);
-            animation: scan 2s linear infinite;
-        }
-
-        @keyframes scan {
-            0% { transform: translateX(-100%); }
-            100% { transform: translateX(100%); }
-        }
-
-        .pair-code {
-            font-family: 'Orbitron', monospace;
-            font-size: 2.5rem;
-            font-weight: 700;
-            color: var(--accent);
-            letter-spacing: 8px;
-            text-shadow: 0 0 20px rgba(0, 255, 136, 0.8);
-            animation: codePulse 1.5s ease-in-out infinite;
-        }
-
-        @keyframes codePulse {
-            0%, 100% { opacity: 1; text-shadow: 0 0 20px rgba(0, 255, 136, 0.8); }
-            50% { opacity: 0.8; text-shadow: 0 0 40px rgba(0, 255, 136, 1); }
-        }
+        .status-connecting { color: #f39c12; }
+        .status-connected { color: #27ae60; }
+        .status-error { color: #e74c3c; }
 
         .qr-container {
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 20px;
-            padding: 30px;
-            display: inline-block;
             margin: 20px 0;
-            border: 2px solid var(--primary);
-            box-shadow: 0 0 30px rgba(0, 212, 255, 0.2);
+            padding: 20px;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            display: none;
         }
 
-        .qr-image {
+        .qr-container.active {
+            display: block;
+            animation: fadeIn 0.5s ease;
+        }
+
+        .qr-code {
             max-width: 300px;
+            width: 100%;
             height: auto;
             border-radius: 10px;
         }
 
-        .session-box {
-            background: linear-gradient(135deg, rgba(0, 212, 255, 0.1), rgba(255, 0, 255, 0.1));
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            border-radius: 15px;
-            padding: 20px;
+        .pairing-section {
             margin-top: 20px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .pairing-section.active {
+            display: block;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            margin: 10px 0;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            font-size: 16px;
+            border-radius: 30px;
+            cursor: pointer;
+            transition: transform 0.3s, box-shadow 0.3s;
+            font-weight: 600;
+            margin: 10px 5px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+        }
+
+        .session-data {
+            margin-top: 20px;
+            padding: 15px;
+            background: #d4edda;
+            border-radius: 10px;
+            color: #155724;
+            display: none;
             word-break: break-all;
             font-family: monospace;
-            font-size: 0.9rem;
-            color: var(--primary);
-            position: relative;
-            cursor: pointer;
-            transition: all 0.3s;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
         }
 
-        .session-box:hover {
-            background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(255, 0, 255, 0.2));
-            transform: translateY(-2px);
-            box-shadow: 0 10px 30px rgba(0, 212, 255, 0.2);
+        .session-data.active {
+            display: block;
+            animation: slideIn 0.5s ease;
         }
 
-        .copy-hint {
-            position: absolute;
-            top: 5px;
-            right: 10px;
-            font-size: 0.7rem;
-            color: rgba(255, 255, 255, 0.5);
-            text-transform: uppercase;
-        }
-
-        .status {
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
-            padding: 12px 25px;
-            border-radius: 25px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            font-size: 0.9rem;
-            margin-top: 20px;
-        }
-
-        .status-waiting {
-            background: rgba(255, 193, 7, 0.2);
-            border: 1px solid #ffc107;
-            color: #ffc107;
-            animation: statusPulse 2s infinite;
-        }
-
-        .status-connected {
-            background: rgba(0, 255, 136, 0.2);
-            border: 1px solid var(--accent);
-            color: var(--accent);
-        }
-
-        @keyframes statusPulse {
-            0%, 100% { box-shadow: 0 0 5px rgba(255, 193, 7, 0.5); }
-            50% { box-shadow: 0 0 20px rgba(255, 193, 7, 0.8); }
-        }
-
-        .status-dot {
-            width: 10px;
-            height: 10px;
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
             border-radius: 50%;
-            background: currentColor;
-            animation: dotPulse 1.5s infinite;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
         }
 
-        @keyframes dotPulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.5; transform: scale(1.2); }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.9); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         .instructions {
-            background: rgba(255, 255, 255, 0.03);
-            border-left: 3px solid var(--primary);
-            padding: 20px 25px;
-            margin-top: 30px;
-            border-radius: 0 15px 15px 0;
-        }
-
-        .instructions h3 {
-            color: var(--primary);
-            margin-bottom: 15px;
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1rem;
+            text-align: left;
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #1565c0;
         }
 
         .instructions ol {
             margin-left: 20px;
-            color: rgba(255, 255, 255, 0.7);
-            line-height: 1.8;
+            margin-top: 10px;
         }
 
         .instructions li {
-            margin: 8px 0;
+            margin: 5px 0;
         }
 
-        .footer {
-            text-align: center;
-            padding: 40px 20px;
-            margin-top: 60px;
-            border-top: 1px solid var(--glass-border);
-            background: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.5) 100%);
-            position: relative;
-        }
-
-        .footer::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 200px;
-            height: 1px;
-            background: linear-gradient(90deg, transparent, var(--primary), transparent);
-        }
-
-        .footer-text {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.2rem;
-            font-weight: 700;
-            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            letter-spacing: 3px;
-            margin-bottom: 10px;
-        }
-
-        .footer-sub {
-            color: rgba(255, 255, 255, 0.4);
-            font-size: 0.9rem;
-            letter-spacing: 2px;
-        }
-
-        .footer-icons {
-            margin-top: 20px;
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-        }
-
-        .footer-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: var(--glass);
-            border: 1px solid var(--glass-border);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: var(--primary);
-            font-size: 1.2rem;
-            transition: all 0.3s;
-            cursor: pointer;
-        }
-
-        .footer-icon:hover {
-            background: var(--primary);
-            color: #000;
-            transform: translateY(-5px);
-            box-shadow: 0 10px 20px rgba(0, 212, 255, 0.3);
-        }
-
-        .loader {
+        .error-box {
+            background: #fee;
+            color: #c33;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 10px 0;
             display: none;
-            width: 60px;
-            height: 60px;
-            border: 4px solid rgba(0, 212, 255, 0.1);
-            border-top-color: var(--primary);
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 30px auto;
         }
 
-        .loader.active {
+        .error-box.active {
             display: block;
         }
 
-        @keyframes spin {
-            to { transform: rotate(360deg); }
+        .tabs {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 20px;
+            gap: 10px;
         }
 
-        @media (max-width: 768px) {
-            .cards-container {
-                grid-template-columns: 1fr;
-                gap: 30px;
-            }
-            
-            .glass-card {
-                padding: 30px 20px;
-            }
-            
-            .pair-code {
-                font-size: 1.8rem;
-                letter-spacing: 4px;
-            }
-            
-            .qr-image {
-                max-width: 250px;
-            }
+        .tab {
+            padding: 10px 20px;
+            background: #f0f0f0;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
         }
 
-        ::-webkit-scrollbar {
-            width: 10px;
+        .tab.active {
+            background: #667eea;
+            color: white;
         }
 
-        ::-webkit-scrollbar-track {
-            background: var(--dark);
+        .tab-content {
+            display: none;
         }
 
-        ::-webkit-scrollbar-thumb {
-            background: linear-gradient(var(--primary), var(--secondary));
-            border-radius: 5px;
+        .tab-content.active {
+            display: block;
         }
 
-        ::-webkit-scrollbar-thumb:hover {
-            background: linear-gradient(var(--secondary), var(--primary));
+        .code-display {
+            font-size: 2em;
+            font-weight: bold;
+            color: #667eea;
+            letter-spacing: 5px;
+            margin: 20px 0;
+            padding: 20px;
+            background: white;
+            border-radius: 10px;
+            border: 2px dashed #667eea;
         }
     </style>
 </head>
 <body>
-    <div class="bg-animation"></div>
-    <div class="particles" id="particles"></div>
+    <div class="container">
+        <div class="logo">🧠</div>
+        <h1>Mega Mind Session</h1>
+        <p class="subtitle">WhatsApp Bot Session Generator</p>
 
-    <div class="container-3d">
-        <header class="header">
-            <h1 class="logo">MEGA MIND</h1>
-            <p class="subtitle">Advanced WhatsApp Session Generator</p>
-        </header>
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('qr')">QR Code</button>
+            <button class="tab" onclick="switchTab('pairing')">Pairing Code</button>
+        </div>
 
-        <div class="cards-container">
-            <div class="glass-card" id="pairCard">
-                <div class="card-icon">📱</div>
-                <h2 class="card-title">Pair Code</h2>
-                <p class="card-desc">
-                    Generate a pairing code to link your WhatsApp without scanning QR. 
-                    Fastest method for mobile devices.
+        <div id="status-box" class="status-box">
+            <span id="status-text" class="status-text">Click Start to generate session</span>
+        </div>
+
+        <div class="error-box" id="error-box"></div>
+
+        <!-- QR Code Tab -->
+        <div id="qr-tab" class="tab-content active">
+            <div id="qr-container" class="qr-container">
+                <img id="qr-code" class="qr-code" alt="QR Code">
+                <p style="margin-top: 15px; color: #666; font-size: 14px;">
+                    Scan with WhatsApp → Settings → Linked Devices
                 </p>
-                <button class="btn
+            </div>
+        </div>
+
+        <!-- Pairing Code Tab -->
+        <div id="pairing-tab" class="tab-content">
+            <div id="pairing-section" class="pairing-section active">
+                <p style="margin-bottom: 15px; color: #666;">
+                    Enter your phone number with country code (e.g., 1234567890)
+                </p>
+                <input type="text" id="phone-number" placeholder="1234567890" maxlength="15">
+                <button class="btn" onclick="requestPairingCode()" id="pairing-btn">
+                    Get Pairing Code
+                </button>
+                <div id="code-display" class="code-display" style="display: none;"></div>
+            </div>
+        </div>
+
+        <button class="btn" id="start-btn" onclick="startSession()">
+            Start Session
+        </button>
+        
+        <button class="btn btn-secondary" id="disconnect-btn" onclick="disconnectSession()" style="display: none;">
+            Disconnect
+        </button>
+
+        <div id="session-data" class="session-data"></div>
+
+        <div class="instructions">
+            <strong>How to use:</strong>
+            <ol>
+                <li>Click "Start Session"</li>
+                <li>Choose QR Code or Pairing Code method</li>
+                <li>For QR: Scan with WhatsApp > Linked Devices</li>
+                <li>For Pairing Code: Enter phone number, get 8-digit code</li>
+                <li>Wait for "Connected" status</li>
+                <li>Copy the session data to your Mega Mind bot</li>
+            </ol>
+        </div>
+    </div>
+
+    <script>
+        let socket;
+        let currentSessionId;
+        let currentMethod = 'qr';
+
+        function switchTab(method) {
+            currentMethod = method;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            
+            event.target.classList.add('active');
+            document.getElementById(method + '-tab').classList.add('active');
+        }
+
+        function generateSessionId() {
+            return 'mega-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+        }
+
+        function updateStatus(message, type = 'normal') {
+            const statusText = document.getElementById('status-text');
+            const statusBox = document.getElementById('status-box');
+            
+            statusText.innerHTML = message;
+            statusBox.className = 'status-box';
+            
+            if (type === 'connecting') statusBox.classList.add('status-connecting');
+            if (type === 'connected') statusBox.classList.add('status-connected');
+            if (type === 'error') statusBox.classList.add('status-error');
+        }
+
+        function showError(message) {
+            const errorBox = document.getElementById('error-box');
+            errorBox.textContent = message;
+            errorBox.classList.add('active');
+            setTimeout(() => errorBox.classList.remove('active'), 5000);
+        }
+
+        function startSession() {
+            currentSessionId = generateSessionId();
+            
+            // Reset UI
+            document.getElementById('qr-container').classList.remove('active');
+            document.getElementById('session-data').classList.remove('active');
+            document.getElementById('start-btn').style.display = 'none';
+            document.getElementById('disconnect-btn').style.display = 'inline-block';
+            document.getElementById('code-display').style.display = 'none';
+
+            // Connect to server
+            socket = io();
+
+            socket.on('connect', () => {
+                console.log('Connected to server');
+                socket.emit('start-session', { sessionId: currentSessionId });
+            });
+
+            socket.on('status', (data) => {
+                updateStatus(data.message, data.status);
+            });
+
+            socket.on('qr', (data) => {
+                document.getElementById('qr-code').src = data.qr;
+                document.getElementById('qr-container').classList.add('active');
+                updateStatus('Scan the QR code with WhatsApp', 'connecting');
+            });
+
+            socket.on('pairing-code', (data) => {
+                const codeDisplay = document.getElementById('code-display');
+                codeDisplay.textContent = data.code;
+                codeDisplay.style.display = 'block';
+                updateStatus(data.message, 'connecting');
+            });
+
+            socket.on('connected', (data) => {
+                updateStatus(`Connected as ${data.user.name}`, 'connected');
+                document.getElementById('qr-container').classList.remove('active');
+                document.getElementById('pairing-section').style.display = 'none';
+            });
+
+            socket.on('session-ready', (data) => {
+                const sessionData = document.getElementById('session-data');
+                sessionData.innerHTML = `
+                    <strong>✅ Session Created!</strong><br><br>
+                    <button class="btn" onclick="downloadSession()" style="margin-bottom: 10px;">
+                        Download Session File
+                    </button><br>
+                    <small>Or copy the data below:</small><br><br>
+                    ${data.sessionData}
+                `;
+                sessionData.classList.add('active');
+            });
+
+            socket.on('error', (data) => {
+                showError(data.message);
+                updateStatus('Error occurred', 'error');
+            });
+
+            socket.on('disconnected', (data) => {
+                updateStatus(data.message);
+                resetUI();
+            });
+
+            updateStatus('<span class="loading"></span>Initializing...', 'connecting');
+        }
+
+        function requestPairingCode() {
+            if (!socket) {
+                showError('Please start session first');
+                return;
+            }
+
+            const phoneNumber = document.getElementById('phone-number').value.trim();
+            if (!phoneNumber || phoneNumber.length < 10) {
+                showError('Please enter a valid phone number with country code');
+                return;
+            }
+
+            socket.emit('request-pairing-code', {
+                sessionId: currentSessionId,
+                phoneNumber: phoneNumber
+            });
+
+            document.getElementById('pairing-btn').disabled = true;
+            document.getElementById('pairing-btn').textContent = 'Generating...';
+        }
+
+        function disconnectSession() {
+            if (socket) {
+                socket.emit('disconnect-session', { sessionId: currentSessionId });
+                socket.disconnect();
+            }
+            resetUI();
+        }
+
+        function resetUI() {
+            document.getElementById('start-btn').style.display = 'inline-block';
+            document.getElementById('disconnect-btn').style.display = 'none';
+            document.getElementById('qr-container').classList.remove('active');
+            document.getElementById('session-data').classList.remove('active');
+            document.getElementById('pairing-section').style.display = 'block';
+            document.getElementById('pairing-btn').disabled = false;
+            document.getElementById('pairing-btn').textContent = 'Get Pairing Code';
+            document.getElementById('code-display').style.display = 'none';
+            document.getElementById('phone-number').value = '';
+        }
+
+        function downloadSession() {
+            if (currentSessionId) {
+                window.location.href = `/download/${currentSessionId}`;
+            }
+        }
+
+        // Cleanup on page unload
+        window.onbeforeunload = () => {
+            if (socket) {
+                socket.disconnect();
+            }
+        };
+    </script>
+</body>
+</html>
