@@ -26,16 +26,12 @@ const io = new Server(httpServer, {
 const PORT = process.env.PORT || 3000;
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 
-// Ensure sessions directory exists
 fs.ensureDirSync(SESSIONS_DIR);
 
-// Store all active sessions (multi-device support)
-const activeSessions = new Map(); // sessionId -> { socket, user, connectedAt, clientSocketId }
+const activeSessions = new Map();
 
-// Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Get all sessions endpoint
 app.get('/api/sessions', async (req, res) => {
     try {
         const sessions = [];
@@ -58,7 +54,6 @@ app.get('/api/sessions', async (req, res) => {
     }
 });
 
-// Delete session endpoint
 app.delete('/api/sessions/:sessionId', async (req, res) => {
     const { sessionId } = req.params;
     try {
@@ -69,7 +64,6 @@ app.delete('/api/sessions/:sessionId', async (req, res) => {
     }
 });
 
-// Disconnect and cleanup session
 async function disconnectSession(sessionId) {
     if (activeSessions.has(sessionId)) {
         const session = activeSessions.get(sessionId);
@@ -91,11 +85,9 @@ async function disconnectSession(sessionId) {
     return true;
 }
 
-// Socket.IO connection handling
 io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
 
-    // Send current sessions to new client
     const sessionsList = Array.from(activeSessions.entries()).map(([id, data]) => ({
         id,
         status: 'connected',
@@ -104,7 +96,6 @@ io.on('connection', (socket) => {
     }));
     socket.emit('sessions-list', sessionsList);
 
-    // Initialize new WhatsApp connection (QR)
     socket.on('init-qr', async (data) => {
         try {
             const sessionId = data.sessionId || `session-${uuidv4()}`;
@@ -124,7 +115,6 @@ io.on('connection', (socket) => {
                 syncFullHistory: false
             });
 
-            // Store session data
             const sessionData = {
                 socket: sock,
                 user: null,
@@ -134,20 +124,16 @@ io.on('connection', (socket) => {
             };
             activeSessions.set(sessionId, sessionData);
 
-            // Save credentials when updated
             sock.ev.on('creds.update', saveCreds);
 
-            // Connection updates
             sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr } = update;
 
-                // Send QR code to frontend
                 if (qr) {
                     try {
                         const qrDataUrl = await QRCode.toDataURL(qr);
                         socket.emit('qr', { qr: qrDataUrl, sessionId });
                         
-                        // QR expires in 60 seconds, auto-regenerate
                         if (sessionData.qrTimeout) clearTimeout(sessionData.qrTimeout);
                         sessionData.qrTimeout = setTimeout(() => {
                             socket.emit('qr-expired', { sessionId });
@@ -157,7 +143,6 @@ io.on('connection', (socket) => {
                     }
                 }
 
-                // Connection established
                 if (connection === 'open') {
                     console.log(`Session ${sessionId} connected`);
                     sessionData.user = sock.user;
@@ -170,7 +155,6 @@ io.on('connection', (socket) => {
                         message: 'Successfully connected to WhatsApp!'
                     });
                     
-                    // Broadcast to all clients about new session
                     io.emit('session-updated', {
                         id: sessionId,
                         status: 'connected',
@@ -179,7 +163,6 @@ io.on('connection', (socket) => {
                     });
                 }
 
-                // Connection closed
                 if (connection === 'close') {
                     const lastError = lastDisconnect?.error;
                     const statusCode = lastError?.output?.statusCode;
@@ -195,22 +178,14 @@ io.on('connection', (socket) => {
                 }
             });
 
-            // Handle incoming messages
             sock.ev.on('messages.upsert', async (m) => {
                 console.log(`New message in session ${sessionId}`);
                 socket.emit('new-message', { sessionId, data: m });
-                
-                // Broadcast to all clients viewing this session
                 io.emit('message-received', {
                     sessionId,
                     message: m.messages[0],
                     timestamp: new Date()
                 });
-            });
-
-            // Handle presence updates
-            sock.ev.on('presence.update', (update) => {
-                socket.emit('presence-update', { sessionId, update });
             });
 
         } catch (error) {
@@ -219,11 +194,31 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Request pairing code for new session
     socket.on('request-pairing-code', async (data) => {
         try {
-            const sessionId = data.sessionId || `session-${uuidv4()}`;
-            const { phoneNumber } = data;
+            let { phoneNumber, sessionId } = data;
+            
+            if (!phoneNumber) {
+                socket.emit('error', { message: 'Phone number is required' });
+                return;
+            }
+
+            let cleanNumber = phoneNumber.replace(/\D/g, '');
+            
+            if (cleanNumber.startsWith('0')) {
+                cleanNumber = cleanNumber.substring(1);
+            }
+            
+            if (cleanNumber.length < 10) {
+                socket.emit('error', { 
+                    message: 'Invalid phone number. Please include country code (e.g., 12345678901 for US)' 
+                });
+                return;
+            }
+
+            console.log(`Requesting pairing code for: ${cleanNumber}`);
+
+            sessionId = sessionId || `session-${uuidv4()}`;
             const sessionPath = path.join(SESSIONS_DIR, sessionId);
             
             await fs.ensureDir(sessionPath);
@@ -236,7 +231,7 @@ io.on('connection', (socket) => {
                 auth: state,
                 logger: P({ level: 'silent' }),
                 printQRInTerminal: false,
-                browser: ['Chrome (Linux)', '', ''],
+                browser: ['Ubuntu', 'Chrome', '20.0.04'],
                 syncFullHistory: false
             });
 
@@ -245,30 +240,57 @@ io.on('connection', (socket) => {
                 user: null,
                 connectedAt: null,
                 clientSocketId: socket.id,
-                qrTimeout: null
+                pairingCode: null
             };
             activeSessions.set(sessionId, sessionData);
 
             sock.ev.on('creds.update', saveCreds);
 
-            let pairingCodeRequested = false;
+            let codeRequested = false;
 
             sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect } = update;
+                
+                console.log(`Connection update for ${sessionId}:`, connection);
 
-                if (!pairingCodeRequested && (connection === 'connecting' || !connection)) {
+                if (!codeRequested && connection === 'connecting') {
                     try {
-                        pairingCodeRequested = true;
-                        const cleanNumber = phoneNumber.replace(/\D/g, '');
+                        codeRequested = true;
+                        
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        
+                        console.log(`Requesting pairing code for ${cleanNumber}...`);
+                        
                         const code = await sock.requestPairingCode(cleanNumber);
+                        
+                        console.log(`Pairing code received: ${code}`);
+                        
+                        sessionData.pairingCode = code;
                         socket.emit('pairing-code', { code, sessionId });
+                        
                     } catch (err) {
-                        console.error('Pairing code error:', err);
-                        socket.emit('error', { message: 'Failed to get pairing code. Try QR method instead.' });
+                        console.error('Pairing code request failed:', err);
+                        
+                        let errorMsg = 'Failed to get pairing code. ';
+                        
+                        if (err.message.includes('not authorized')) {
+                            errorMsg += 'Phone number not authorized. Try QR code method.';
+                        } else if (err.message.includes('timeout')) {
+                            errorMsg += 'Request timed out. Please try again.';
+                        } else if (err.message.includes('invalid')) {
+                            errorMsg += 'Invalid phone number format. Use format: 12345678901';
+                        } else {
+                            errorMsg += 'Try using QR code method instead.';
+                        }
+                        
+                        socket.emit('error', { message: errorMsg });
+                        
+                        await disconnectSession(sessionId);
                     }
                 }
 
                 if (connection === 'open') {
+                    console.log(`Session ${sessionId} connected successfully`);
                     sessionData.user = sock.user;
                     sessionData.connectedAt = new Date();
                     
@@ -300,17 +322,17 @@ io.on('connection', (socket) => {
 
         } catch (error) {
             console.error('Pairing code error:', error);
-            socket.emit('error', { message: 'Failed to request pairing code: ' + error.message });
+            socket.emit('error', { 
+                message: 'Failed to request pairing code: ' + error.message 
+            });
         }
     });
 
-    // Connect to existing session (for reconnection)
     socket.on('connect-existing', async (data) => {
         const { sessionId } = data;
         if (activeSessions.has(sessionId)) {
             socket.emit('session-resumed', { sessionId, message: 'Connected to existing session' });
         } else {
-            // Try to restore from saved credentials
             try {
                 const sessionPath = path.join(SESSIONS_DIR, sessionId);
                 if (await fs.pathExists(sessionPath)) {
@@ -354,7 +376,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Disconnect specific session
     socket.on('disconnect-session', async (data) => {
         const { sessionId } = data;
         await disconnectSession(sessionId);
@@ -362,7 +383,6 @@ io.on('connection', (socket) => {
         io.emit('session-removed', { sessionId });
     });
 
-    // Get all active sessions
     socket.on('get-sessions', () => {
         const sessions = Array.from(activeSessions.entries()).map(([id, data]) => ({
             id,
@@ -373,7 +393,6 @@ io.on('connection', (socket) => {
         socket.emit('sessions-list', sessions);
     });
 
-    // Switch to session (for multi-device management)
     socket.on('switch-session', (data) => {
         const { sessionId } = data;
         if (activeSessions.has(sessionId)) {
@@ -388,15 +407,12 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Client disconnect
     socket.on('disconnect', () => {
         console.log('Client disconnected:', socket.id);
-        // Don't disconnect WhatsApp sessions - they persist until explicitly logged out
     });
 });
 
 httpServer.listen(PORT, () => {
     console.log(`Multi-Device WhatsApp Server running on port ${PORT}`);
     console.log(`Open http://localhost:${PORT} to view the app`);
-    console.log(`Supports multiple simultaneous WhatsApp connections`);
 });
