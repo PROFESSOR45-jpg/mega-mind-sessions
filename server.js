@@ -12,6 +12,7 @@ const P = require('pino');
 const QRCode = require('qrcode');
 const fs = require('fs-extra');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const httpServer = createServer(app);
@@ -28,38 +29,85 @@ const SESSIONS_DIR = path.join(__dirname, 'sessions');
 // Ensure sessions directory exists
 fs.ensureDirSync(SESSIONS_DIR);
 
-// Store active sockets
-const activeSockets = new Map();
+// Store all active sessions (multi-device support)
+const activeSessions = new Map(); // sessionId -> { socket, user, connectedAt, clientSocketId }
 
-// Serve static files from public folder
+// Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Get all sessions
+// Get all sessions endpoint
 app.get('/api/sessions', async (req, res) => {
     try {
-        const sessions = await fs.readdir(SESSIONS_DIR);
-        const sessionData = sessions.filter(s => !s.startsWith('.')).map(id => ({
-            id,
-            status: activeSockets.has(id) ? 'connected' : 'disconnected',
-            connectedAt: activeSockets.has(id) ? activeSockets.get(id).connectedAt : null
-        }));
-        res.json(sessionData);
+        const sessions = [];
+        const sessionFolders = await fs.readdir(SESSIONS_DIR);
+        
+        for (const sessionId of sessionFolders.filter(s => !s.startsWith('.'))) {
+            const sessionData = activeSessions.get(sessionId);
+            sessions.push({
+                id: sessionId,
+                status: sessionData ? 'connected' : 'disconnected',
+                user: sessionData?.user || null,
+                connectedAt: sessionData?.connectedAt || null,
+                phone: sessionData?.user?.id?.split(':')[0] || null
+            });
+        }
+        
+        res.json(sessions);
     } catch (err) {
         res.json([]);
     }
 });
 
+// Delete session endpoint
+app.delete('/api/sessions/:sessionId', async (req, res) => {
+    const { sessionId } = req.params;
+    try {
+        await disconnectSession(sessionId);
+        res.json({ success: true, message: 'Session deleted' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Disconnect and cleanup session
+async function disconnectSession(sessionId) {
+    if (activeSessions.has(sessionId)) {
+        const session = activeSessions.get(sessionId);
+        try {
+            await session.socket.logout();
+        } catch (e) {
+            console.log('Logout error:', e.message);
+        }
+        activeSessions.delete(sessionId);
+    }
+    
+    const sessionPath = path.join(SESSIONS_DIR, sessionId);
+    try {
+        await fs.remove(sessionPath);
+    } catch (e) {
+        console.log('Remove session folder error:', e.message);
+    }
+    
+    return true;
+}
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
-    let currentSocket = null;
-    let currentSessionId = null;
 
-    // Initialize WhatsApp connection with QR
+    // Send current sessions to new client
+    const sessionsList = Array.from(activeSessions.entries()).map(([id, data]) => ({
+        id,
+        status: 'connected',
+        user: data.user,
+        connectedAt: data.connectedAt
+    }));
+    socket.emit('sessions-list', sessionsList);
+
+    // Initialize new WhatsApp connection (QR)
     socket.on('init-qr', async (data) => {
         try {
-            const { sessionId } = data;
-            currentSessionId = sessionId;
+            const sessionId = data.sessionId || `session-${uuidv4()}`;
             const sessionPath = path.join(SESSIONS_DIR, sessionId);
             
             await fs.ensureDir(sessionPath);
@@ -72,11 +120,19 @@ io.on('connection', (socket) => {
                 auth: state,
                 logger: P({ level: 'silent' }),
                 printQRInTerminal: false,
-                browser: ['Chrome (Linux)', '', '']
+                browser: ['Chrome (Linux)', '', ''],
+                syncFullHistory: false
             });
 
-            currentSocket = sock;
-            activeSockets.set(sessionId, { socket: sock, connectedAt: new Date() });
+            // Store session data
+            const sessionData = {
+                socket: sock,
+                user: null,
+                connectedAt: null,
+                clientSocketId: socket.id,
+                qrTimeout: null
+            };
+            activeSessions.set(sessionId, sessionData);
 
             // Save credentials when updated
             sock.ev.on('creds.update', saveCreds);
@@ -90,6 +146,12 @@ io.on('connection', (socket) => {
                     try {
                         const qrDataUrl = await QRCode.toDataURL(qr);
                         socket.emit('qr', { qr: qrDataUrl, sessionId });
+                        
+                        // QR expires in 60 seconds, auto-regenerate
+                        if (sessionData.qrTimeout) clearTimeout(sessionData.qrTimeout);
+                        sessionData.qrTimeout = setTimeout(() => {
+                            socket.emit('qr-expired', { sessionId });
+                        }, 60000);
                     } catch (err) {
                         console.error('QR generation error:', err);
                     }
@@ -98,10 +160,22 @@ io.on('connection', (socket) => {
                 // Connection established
                 if (connection === 'open') {
                     console.log(`Session ${sessionId} connected`);
+                    sessionData.user = sock.user;
+                    sessionData.connectedAt = new Date();
+                    if (sessionData.qrTimeout) clearTimeout(sessionData.qrTimeout);
+                    
                     socket.emit('connected', { 
                         sessionId, 
                         user: sock.user,
                         message: 'Successfully connected to WhatsApp!'
+                    });
+                    
+                    // Broadcast to all clients about new session
+                    io.emit('session-updated', {
+                        id: sessionId,
+                        status: 'connected',
+                        user: sock.user,
+                        connectedAt: sessionData.connectedAt
                     });
                 }
 
@@ -115,28 +189,41 @@ io.on('connection', (socket) => {
                         socket.emit('reconnecting', { sessionId, message: 'Reconnecting...' });
                     } else {
                         socket.emit('disconnected', { sessionId, message: 'Logged out' });
-                        activeSockets.delete(sessionId);
-                        await fs.remove(sessionPath);
+                        await disconnectSession(sessionId);
+                        io.emit('session-removed', { sessionId });
                     }
                 }
             });
 
-            // Handle messages
+            // Handle incoming messages
             sock.ev.on('messages.upsert', async (m) => {
-                console.log('New message received');
+                console.log(`New message in session ${sessionId}`);
                 socket.emit('new-message', { sessionId, data: m });
+                
+                // Broadcast to all clients viewing this session
+                io.emit('message-received', {
+                    sessionId,
+                    message: m.messages[0],
+                    timestamp: new Date()
+                });
             });
+
+            // Handle presence updates
+            sock.ev.on('presence.update', (update) => {
+                socket.emit('presence-update', { sessionId, update });
+            });
+
         } catch (error) {
             console.error('QR Init error:', error);
             socket.emit('error', { message: 'Failed to initialize QR: ' + error.message });
         }
     });
 
-    // Request pairing code
+    // Request pairing code for new session
     socket.on('request-pairing-code', async (data) => {
         try {
-            const { phoneNumber, sessionId } = data;
-            currentSessionId = sessionId;
+            const sessionId = data.sessionId || `session-${uuidv4()}`;
+            const { phoneNumber } = data;
             const sessionPath = path.join(SESSIONS_DIR, sessionId);
             
             await fs.ensureDir(sessionPath);
@@ -149,11 +236,18 @@ io.on('connection', (socket) => {
                 auth: state,
                 logger: P({ level: 'silent' }),
                 printQRInTerminal: false,
-                browser: ['Chrome (Linux)', '', '']
+                browser: ['Chrome (Linux)', '', ''],
+                syncFullHistory: false
             });
 
-            currentSocket = sock;
-            activeSockets.set(sessionId, { socket: sock, connectedAt: new Date() });
+            const sessionData = {
+                socket: sock,
+                user: null,
+                connectedAt: null,
+                clientSocketId: socket.id,
+                qrTimeout: null
+            };
+            activeSessions.set(sessionId, sessionData);
 
             sock.ev.on('creds.update', saveCreds);
 
@@ -162,11 +256,9 @@ io.on('connection', (socket) => {
             sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect } = update;
 
-                // Request pairing code when connecting
                 if (!pairingCodeRequested && (connection === 'connecting' || !connection)) {
                     try {
                         pairingCodeRequested = true;
-                        // Format phone number (remove + if present)
                         const cleanNumber = phoneNumber.replace(/\D/g, '');
                         const code = await sock.requestPairingCode(cleanNumber);
                         socket.emit('pairing-code', { code, sessionId });
@@ -177,10 +269,20 @@ io.on('connection', (socket) => {
                 }
 
                 if (connection === 'open') {
+                    sessionData.user = sock.user;
+                    sessionData.connectedAt = new Date();
+                    
                     socket.emit('connected', { 
                         sessionId, 
                         user: sock.user,
                         message: 'Successfully connected to WhatsApp!'
+                    });
+                    
+                    io.emit('session-updated', {
+                        id: sessionId,
+                        status: 'connected',
+                        user: sock.user,
+                        connectedAt: sessionData.connectedAt
                     });
                 }
 
@@ -190,41 +292,111 @@ io.on('connection', (socket) => {
                     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                     
                     if (!shouldReconnect) {
-                        activeSockets.delete(sessionId);
-                        await fs.remove(sessionPath);
+                        await disconnectSession(sessionId);
+                        io.emit('session-removed', { sessionId });
                     }
                 }
             });
+
         } catch (error) {
             console.error('Pairing code error:', error);
             socket.emit('error', { message: 'Failed to request pairing code: ' + error.message });
         }
     });
 
-    // Disconnect session
-    socket.on('disconnect-session', async (data) => {
-        try {
-            const { sessionId } = data;
-            if (activeSockets.has(sessionId)) {
-                const { socket: sock } = activeSockets.get(sessionId);
-                await sock.logout();
-                activeSockets.delete(sessionId);
+    // Connect to existing session (for reconnection)
+    socket.on('connect-existing', async (data) => {
+        const { sessionId } = data;
+        if (activeSessions.has(sessionId)) {
+            socket.emit('session-resumed', { sessionId, message: 'Connected to existing session' });
+        } else {
+            // Try to restore from saved credentials
+            try {
+                const sessionPath = path.join(SESSIONS_DIR, sessionId);
+                if (await fs.pathExists(sessionPath)) {
+                    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+                    const { version } = await fetchLatestBaileysVersion();
+                    
+                    const sock = makeWASocket({
+                        version,
+                        auth: state,
+                        logger: P({ level: 'silent' }),
+                        printQRInTerminal: false,
+                        browser: ['Chrome (Linux)', '', ''],
+                        syncFullHistory: false
+                    });
+
+                    activeSessions.set(sessionId, {
+                        socket: sock,
+                        user: null,
+                        connectedAt: null,
+                        clientSocketId: socket.id
+                    });
+
+                    sock.ev.on('creds.update', saveCreds);
+                    sock.ev.on('connection.update', async (update) => {
+                        const { connection } = update;
+                        if (connection === 'open') {
+                            const session = activeSessions.get(sessionId);
+                            if (session) {
+                                session.user = sock.user;
+                                session.connectedAt = new Date();
+                            }
+                            socket.emit('connected', { sessionId, user: sock.user });
+                        }
+                    });
+
+                    socket.emit('session-restoring', { sessionId });
+                }
+            } catch (err) {
+                socket.emit('error', { message: 'Failed to restore session' });
             }
-            const sessionPath = path.join(SESSIONS_DIR, sessionId);
-            await fs.remove(sessionPath);
-            socket.emit('disconnected', { sessionId });
-        } catch (error) {
-            console.error('Disconnect error:', error);
+        }
+    });
+
+    // Disconnect specific session
+    socket.on('disconnect-session', async (data) => {
+        const { sessionId } = data;
+        await disconnectSession(sessionId);
+        socket.emit('disconnected', { sessionId });
+        io.emit('session-removed', { sessionId });
+    });
+
+    // Get all active sessions
+    socket.on('get-sessions', () => {
+        const sessions = Array.from(activeSessions.entries()).map(([id, data]) => ({
+            id,
+            status: 'connected',
+            user: data.user,
+            connectedAt: data.connectedAt
+        }));
+        socket.emit('sessions-list', sessions);
+    });
+
+    // Switch to session (for multi-device management)
+    socket.on('switch-session', (data) => {
+        const { sessionId } = data;
+        if (activeSessions.has(sessionId)) {
+            const session = activeSessions.get(sessionId);
+            socket.emit('session-switched', {
+                sessionId,
+                user: session.user,
+                connectedAt: session.connectedAt
+            });
+        } else {
+            socket.emit('error', { message: 'Session not found' });
         }
     });
 
     // Client disconnect
     socket.on('disconnect', () => {
         console.log('Client disconnected:', socket.id);
+        // Don't disconnect WhatsApp sessions - they persist until explicitly logged out
     });
 });
 
 httpServer.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Multi-Device WhatsApp Server running on port ${PORT}`);
     console.log(`Open http://localhost:${PORT} to view the app`);
+    console.log(`Supports multiple simultaneous WhatsApp connections`);
 });
