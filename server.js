@@ -55,7 +55,7 @@ io.on('connection', (socket) => {
     let currentSocket = null;
     let currentSessionId = null;
 
-    // Initialize WhatsApp connection
+    // Initialize WhatsApp connection with QR
     socket.on('init-qr', async (data) => {
         const { sessionId } = data;
         currentSessionId = sessionId;
@@ -106,7 +106,9 @@ io.on('connection', (socket) => {
 
             // Connection closed
             if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+                const lastError = lastDisconnect?.error;
+                const statusCode = lastError?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                 
                 if (shouldReconnect) {
                     socket.emit('reconnecting', { sessionId, message: 'Reconnecting...' });
@@ -173,7 +175,10 @@ io.on('connection', (socket) => {
             }
 
             if (connection === 'close') {
-                const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+                const lastError = lastDisconnect?.error;
+                const statusCode = lastError?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                
                 if (!shouldReconnect) {
                     activeSockets.delete(sessionId);
                     await fs.remove(sessionPath);
