@@ -1,171 +1,60 @@
 const express = require('express');
+const WebSocket = require('ws');
+const QRCode = require('qrcode');
 const path = require('path');
-const pairCode = require('./pairCode');
-const qrSession = require('./qrSession');
-require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+// Serve static files
 app.use(express.static('public'));
+app.use(express.json());
 
+// Routes
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ==================== PAIR CODE ENDPOINTS ====================
-
-app.get('/api/pair/generate', async (req, res) => {
-    const { phone } = req.query;
-    
-    if (!phone) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Phone number required' 
-        });
-    }
-
+// API Routes
+app.get('/api/qr', async (req, res) => {
     try {
-        const sessionId = pairCode.generateSessionId();
-        await pairCode.createPairSession(sessionId, phone);
-        
-        setTimeout(() => {
-            const status = pairCode.getStatus(sessionId);
-            res.json({
-                success: true,
-                sessionId: sessionId,
-                code: status.code || null,
-                phone: phone,
-                message: 'Enter this code in WhatsApp'
-            });
-        }, 2000);
-        
-    } catch (error) {
-        console.error('Pair generation error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
+        const sessionId = generateSessionId();
+        const qrData = await QRCode.toDataURL(sessionId);
+        res.json({ sessionId, qrData });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to generate QR' });
     }
 });
 
-app.get('/api/pair/status/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    const status = pairCode.getStatus(sessionId);
-    res.json(status);
+app.get('/api/pairing-code', (req, res) => {
+    const code = generatePairingCode();
+    res.json({ code });
 });
 
-app.get('/api/pair/session/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    const session = pairCode.getSession(sessionId);
+function generateSessionId() {
+    return 'MEGA-' + Math.random().toString(36).substr(2, 9).toUpperCase();
+}
+
+function generatePairingCode() {
+    return Math.floor(10000000 + Math.random() * 90000000).toString();
+}
+
+// WebSocket for real-time updates
+const server = app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
+
+const wss = new WebSocket.Server({ server });
+
+wss.on('connection', (ws) => {
+    console.log('Client connected');
     
-    if (session) {
-        res.json({
-            status: 'connected',
-            session: session
-        });
-    } else {
-        res.json({
-            status: 'waiting',
-            session: null
-        });
-    }
-});
-
-app.delete('/api/pair/session/:sessionId', async (req, res) => {
-    const { sessionId } = req.params;
-    await pairCode.deleteSession(sessionId);
-    res.json({ success: true, message: 'Session deleted' });
-});
-
-// ==================== QR CODE ENDPOINTS ====================
-
-app.get('/api/qr/generate', async (req, res) => {
-    try {
-        const sessionId = qrSession.generateSessionId();
-        await qrSession.createQRSession(sessionId);
-        
-        res.json({
-            success: true,
-            sessionId: sessionId,
-            message: 'QR generation started'
-        });
-    } catch (error) {
-        console.error('QR generation error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-app.get('/api/qr/status/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    const status = qrSession.getStatus(sessionId);
-    res.json(status);
-});
-
-app.get('/api/qr/session/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    const session = qrSession.getSession(sessionId);
+    ws.on('message', (message) => {
+        const data = JSON.parse(message);
+        // Handle WhatsApp connection logic here
+    });
     
-    if (session) {
-        res.json({
-            status: 'connected',
-            session: session
-        });
-    } else {
-        res.json({
-            status: 'waiting',
-            session: null
-        });
-    }
-});
-
-app.delete('/api/qr/session/:sessionId', async (req, res) => {
-    const { sessionId } = req.params;
-    await qrSession.deleteSession(sessionId);
-    res.json({ success: true, message: 'Session deleted' });
-});
-
-// ==================== ADMIN & HEALTH ====================
-
-app.get('/admin/sessions', (req, res) => {
-    const adminKey = req.headers['x-admin-key'];
-    if (adminKey !== process.env.ADMIN_KEY) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
-    
-    res.json({
-        pairSessions: pairCode.activeSockets ? Array.from(pairCode.activeSockets.keys()) : [],
-        qrSessions: qrSession.activeSockets ? Array.from(qrSession.activeSockets.keys()) : []
+    ws.on('close', () => {
+        console.log('Client disconnected');
     });
 });
-
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'running', 
-        service: 'MEGA MIND Session Server',
-        version: '3.0.0',
-        timestamp: new Date().toISOString()
-    });
-});
-
-app.listen(PORT, () => {
-    console.log(`
-    ███╗   ███╗███████╗ ██████╗  █████╗     ███╗   ███╗██╗███╗   ██╗██████╗ 
-    ████╗ ████║██╔════╝██╔════╝ ██╔══██╗    ████╗ ████║██║████╗  ██║██╔══██╗
-    ██╔████╔██║█████╗  ██║  ███╗███████║    ██╔████╔██║██║██╔██╗ ██║██║  ██║
-    ██║╚██╔╝██║██╔══╝  ██║   ██║██╔══██║    ██║╚██╔╝██║██║██║╚██╗██║██║  ██║
-    ██║ ╚═╝ ██║███████╗╚██████╔╝██║  ██║    ██║ ╚═╝ ██║██║██║ ╚████║██████╔╝
-    ╚═╝     ╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝    ╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝ 
-                                                                            
-     🔐 Session Server Running on port ${PORT}
-     📱 Pair Code Endpoint: /api/pair/generate
-     📷 QR Code Endpoint: /api/qr/generate
-     🌐 3D Interface: http://localhost:${PORT}
-    `);
-});
-
-module.exports = app;
