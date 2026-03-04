@@ -6,16 +6,11 @@
     <title>Mega Mind Sessions - WhatsApp Authentication</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;500;700&display=swap');
         
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
             font-family: 'Rajdhani', sans-serif;
@@ -24,11 +19,8 @@
             color: #fff;
         }
         
-        .font-orbitron {
-            font-family: 'Orbitron', sans-serif;
-        }
+        .font-orbitron { font-family: 'Orbitron', sans-serif; }
         
-        /* 3D Container */
         #canvas-container {
             position: fixed;
             top: 0;
@@ -38,7 +30,6 @@
             z-index: 0;
         }
         
-        /* UI Overlay */
         .ui-layer {
             position: relative;
             z-index: 10;
@@ -46,11 +37,8 @@
             pointer-events: none;
         }
         
-        .ui-layer > * {
-            pointer-events: auto;
-        }
+        .ui-layer > * { pointer-events: auto; }
         
-        /* Glassmorphism Cards */
         .glass-card {
             background: rgba(20, 20, 30, 0.6);
             backdrop-filter: blur(20px);
@@ -59,24 +47,10 @@
                         inset 0 1px 0 rgba(255, 255, 255, 0.1);
         }
         
-        /* 3D Button Styles */
         .btn-3d {
             position: relative;
             transform-style: preserve-3d;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        
-        .btn-3d::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, transparent 50%);
-            transform: translateZ(1px);
-            border-radius: inherit;
-            pointer-events: none;
         }
         
         .btn-3d:hover {
@@ -88,7 +62,6 @@
             transform: translateY(-1px) rotateX(2deg);
         }
         
-        /* Neon Glow Effects */
         .neon-text {
             text-shadow: 0 0 10px rgba(0, 255, 255, 0.5),
                          0 0 20px rgba(0, 255, 255, 0.3),
@@ -100,7 +73,6 @@
                         inset 0 0 20px rgba(0, 255, 255, 0.1);
         }
         
-        /* Page Transitions */
         .page {
             display: none;
             opacity: 0;
@@ -115,15 +87,14 @@
             transform: translateY(0) rotateX(0);
         }
         
-        /* QR Code Container */
         .qr-container {
             background: white;
             padding: 20px;
             border-radius: 16px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            display: inline-block;
         }
         
-        /* Pairing Code Display */
         .pairing-code {
             font-family: 'Orbitron', monospace;
             letter-spacing: 8px;
@@ -134,7 +105,6 @@
             filter: drop-shadow(0 0 20px rgba(0, 255, 255, 0.5));
         }
         
-        /* Loading Animation */
         .loader {
             width: 48px;
             height: 48px;
@@ -148,7 +118,6 @@
             to { transform: rotate(360deg); }
         }
         
-        /* Status Indicator */
         .status-dot {
             width: 12px;
             height: 12px;
@@ -163,14 +132,12 @@
             50% { opacity: 0.5; }
         }
         
-        /* Footer */
         footer {
             background: rgba(0, 0, 0, 0.8);
             border-top: 1px solid rgba(255, 255, 255, 0.1);
             backdrop-filter: blur(10px);
         }
         
-        /* Input Fields */
         .input-3d {
             background: rgba(255, 255, 255, 0.05);
             border: 1px solid rgba(255, 255, 255, 0.2);
@@ -184,17 +151,33 @@
             box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
             transform: translateZ(10px);
         }
+
+        .connected-badge {
+            background: linear-gradient(135deg, #00ff88, #00cc66);
+            animation: glow 2s ease-in-out infinite;
+        }
+
+        @keyframes glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(0, 255, 136, 0.5); }
+            50% { box-shadow: 0 0 40px rgba(0, 255, 136, 0.8); }
+        }
+
+        .error-message {
+            background: rgba(255, 0, 0, 0.2);
+            border: 1px solid rgba(255, 0, 0, 0.5);
+            color: #ff6666;
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
 
-    <!-- 3D Background -->
     <div id="canvas-container"></div>
 
-    <!-- UI Layer -->
     <div class="ui-layer flex flex-col">
         
-        <!-- Header -->
         <header class="w-full p-6 flex justify-between items-center glass-card m-4 rounded-2xl max-w-7xl mx-auto">
             <div class="flex items-center gap-4">
                 <div class="w-12 h-12 rounded-full bg-gradient-to-br from-cyan-400 to-purple-600 flex items-center justify-center shadow-lg">
@@ -208,12 +191,11 @@
                 </div>
             </div>
             <div class="flex items-center gap-4">
-                <div class="status-dot"></div>
-                <span class="text-sm text-gray-300">System Online</span>
+                <div id="connection-status" class="status-dot"></div>
+                <span id="status-text" class="text-sm text-gray-300">System Online</span>
             </div>
         </header>
 
-        <!-- Main Content Area -->
         <main class="flex-1 flex items-center justify-center p-4">
             
             <!-- Home Page -->
@@ -227,7 +209,7 @@
 
                 <div class="grid md:grid-cols-2 gap-8 w-full max-w-3xl">
                     <!-- QR Code Option -->
-                    <div class="glass-card rounded-3xl p-8 flex flex-col items-center gap-6 hover:scale-105 transition-transform duration-300 cursor-pointer" onclick="showPage('qr-page')">
+                    <div class="glass-card rounded-3xl p-8 flex flex-col items-center gap-6 hover:scale-105 transition-transform duration-300 cursor-pointer" onclick="startQRConnection()">
                         <div class="w-24 h-24 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-2xl transform rotate-3 hover:rotate-6 transition-transform">
                             <svg class="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/>
@@ -261,8 +243,8 @@
             </div>
 
             <!-- QR Code Page -->
-            <div id="qr-page" class="page flex-col items-center gap-8 max-w-2xl w-full">
-                <button onclick="showPage('home-page')" class="absolute top-0 left-0 p-4 text-gray-400 hover:text-white transition-colors">
+            <div id="qr-page" class="page flex-col items-center gap-8 max-w-2xl w-full relative">
+                <button onclick="disconnectAndGoHome()" class="absolute top-0 left-0 p-4 text-gray-400 hover:text-white transition-colors">
                     <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
                     </svg>
@@ -271,13 +253,25 @@
                 <div class="glass-card rounded-3xl p-12 flex flex-col items-center gap-8 w-full neon-border">
                     <h2 class="font-orbitron text-3xl font-bold text-center">SCAN QR CODE</h2>
                     
-                    <div class="qr-container" id="qr-display">
+                    <div id="qr-display" class="qr-container">
                         <div class="loader"></div>
+                        <p class="mt-4 text-gray-600">Generating QR Code...</p>
                     </div>
 
+                    <div id="qr-connected" class="hidden flex-col items-center gap-4">
+                        <div class="w-20 h-20 rounded-full connected-badge flex items-center justify-center">
+                            <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+                            </svg>
+                        </div>
+                        <p class="text-green-400 font-bold text-xl">Connected!</p>
+                    </div>
+
+                    <div id="qr-error" class="hidden error-message w-full text-center"></div>
+
                     <div class="text-center space-y-2">
-                        <p class="text-gray-400">Open WhatsApp > Settings > Devices</p>
-                        <p class="text-sm text-cyan-400">QR code refreshes in <span id="qr-timer">60</span>s</p>
+                        <p class="text-gray-400">Open WhatsApp > Settings > Linked Devices</p>
+                        <p class="text-sm text-cyan-400" id="qr-timer-text">Waiting for scan...</p>
                     </div>
 
                     <button onclick="regenerateQR()" class="btn-3d px-8 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 rounded-xl font-bold text-white">
@@ -287,8 +281,8 @@
             </div>
 
             <!-- Pairing Code Page -->
-            <div id="pairing-page" class="page flex-col items-center gap-8 max-w-2xl w-full">
-                <button onclick="showPage('home-page')" class="absolute top-0 left-0 p-4 text-gray-400 hover:text-white transition-colors">
+            <div id="pairing-page" class="page flex-col items-center gap-8 max-w-2xl w-full relative">
+                <button onclick="disconnectAndGoHome()" class="absolute top-0 left-0 p-4 text-gray-400 hover:text-white transition-colors">
                     <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
                     </svg>
@@ -297,50 +291,82 @@
                 <div class="glass-card rounded-3xl p-12 flex flex-col items-center gap-8 w-full neon-border">
                     <h2 class="font-orbitron text-3xl font-bold text-center">PAIRING CODE</h2>
 
-                    <div class="text-center space-y-6">
-                        <div class="pairing-code" id="pairing-display">----</div>
-                        <p class="text-gray-400">Enter this code in WhatsApp</p>
+                    <div id="pairing-step-1" class="w-full space-y-6">
+                        <p class="text-gray-400 text-center">Enter your phone number with country code</p>
+                        <div class="flex gap-2 justify-center">
+                            <span class="text-2xl self-center text-gray-500">+</span>
+                            <input type="tel" id="phone-input" placeholder="1234567890" class="input-3d w-64 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" maxlength="15">
+                        </div>
+                        <button onclick="requestPairingCode()" class="btn-3d w-full py-4 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl font-bold text-white">
+                            GET PAIRING CODE
+                        </button>
                     </div>
 
-                    <div class="w-full space-y-4">
-                        <div class="flex gap-2 justify-center">
-                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 0)">
-                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 1)">
-                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 2)">
-                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 3)">
-                            <span class="text-3xl self-center text-gray-500">-</span>
-                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 4)">
-                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 5)">
-                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 6)">
-                            <input type="text" maxlength="1" class="input-3d w-14 h-16 rounded-xl text-center text-2xl font-bold text-white bg-transparent" oninput="moveToNext(this, 7)">
+                    <div id="pairing-step-2" class="hidden flex-col items-center gap-6 w-full">
+                        <div class="text-center space-y-4">
+                            <p class="text-gray-400">Enter this code in WhatsApp</p>
+                            <div class="pairing-code" id="pairing-display">--------</div>
+                        </div>
+
+                        <div class="w-full p-4 bg-white/5 rounded-xl border border-white/10">
+                            <p class="text-sm text-gray-400 text-center">
+                                WhatsApp > Settings > Linked Devices > Link with phone number
+                            </p>
+                        </div>
+
+                        <div id="pairing-connected" class="hidden flex-col items-center gap-4">
+                            <div class="w-16 h-16 rounded-full connected-badge flex items-center justify-center">
+                                <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+                                </svg>
+                            </div>
+                            <p class="text-green-400 font-bold">Connected!</p>
                         </div>
                     </div>
 
-                    <button onclick="generatePairingCode()" class="btn-3d px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-600 rounded-xl font-bold text-white">
-                        GENERATE NEW CODE
-                    </button>
+                    <div id="pairing-error" class="hidden error-message w-full text-center"></div>
                 </div>
             </div>
 
-            <!-- Session Management Page -->
+            <!-- Session Page -->
             <div id="session-page" class="page flex-col items-center gap-8 max-w-4xl w-full">
                 <div class="glass-card rounded-3xl p-8 w-full">
                     <div class="flex justify-between items-center mb-8">
-                        <h2 class="font-orbitron text-3xl font-bold">ACTIVE SESSIONS</h2>
-                        <button onclick="showPage('home-page')" class="btn-3d px-6 py-2 bg-red-500 rounded-lg font-bold text-white text-sm">
+                        <div>
+                            <h2 class="font-orbitron text-3xl font-bold">ACTIVE SESSION</h2>
+                            <p id="session-user" class="text-gray-400 mt-1">Loading...</p>
+                        </div>
+                        <button onclick="disconnectSession()" class="btn-3d px-6 py-3 bg-red-500 rounded-xl font-bold text-white">
                             DISCONNECT
                         </button>
                     </div>
 
-                    <div class="grid gap-4" id="sessions-list">
-                        <!-- Sessions will be populated here -->
+                    <div class="grid md:grid-cols-3 gap-6">
+                        <div class="glass-card rounded-xl p-6 text-center">
+                            <div class="text-3xl font-bold text-cyan-400" id="msg-count">0</div>
+                            <p class="text-gray-400 text-sm mt-2">Messages Received</p>
+                        </div>
+                        <div class="glass-card rounded-xl p-6 text-center">
+                            <div class="text-3xl font-bold text-purple-400" id="session-time">00:00</div>
+                            <p class="text-gray-400 text-sm mt-2">Session Duration</p>
+                        </div>
+                        <div class="glass-card rounded-xl p-6 text-center">
+                            <div class="text-3xl font-bold text-green-400">ONLINE</div>
+                            <p class="text-gray-400 text-sm mt-2">Status</p>
+                        </div>
+                    </div>
+
+                    <div class="mt-8 glass-card rounded-xl p-6">
+                        <h3 class="font-orbitron text-xl font-bold mb-4">Recent Messages</h3>
+                        <div id="message-list" class="space-y-2 max-h-60 overflow-y-auto">
+                            <p class="text-gray-500 text-center italic">No messages yet...</p>
+                        </div>
                     </div>
                 </div>
             </div>
 
         </main>
 
-        <!-- Footer -->
         <footer class="w-full p-6 text-center mt-auto">
             <p class="font-orbitron text-lg tracking-widest text-gray-400">
                 © PROFESSOR DARK TECH©
@@ -350,15 +376,13 @@
     </div>
 
     <script>
-        // Three.js Background Animation
+        // Three.js Background
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(window.devicePixelRatio);
         document.getElementById('canvas-container').appendChild(renderer.domElement);
 
-        // Create particles
         const particlesGeometry = new THREE.BufferGeometry();
         const particlesCount = 1500;
         const posArray = new Float32Array(particlesCount * 3);
@@ -379,83 +403,33 @@
         const particlesMesh = new THREE.Points(particlesGeometry, particlesMaterial);
         scene.add(particlesMesh);
 
-        // Add floating geometric shapes
-        const geometries = [];
-        const shapes = [
-            new THREE.IcosahedronGeometry(2, 0),
-            new THREE.OctahedronGeometry(2, 0),
-            new THREE.TetrahedronGeometry(2, 0)
-        ];
-
-        for(let i = 0; i < 5; i++) {
-            const geometry = shapes[Math.floor(Math.random() * shapes.length)];
-            const material = new THREE.MeshBasicMaterial({
-                color: i % 2 === 0 ? 0x00ffff : 0xff00ff,
-                wireframe: true,
-                transparent: true,
-                opacity: 0.3
-            });
-            const mesh = new THREE.Mesh(geometry, material);
-            mesh.position.set(
-                (Math.random() - 0.5) * 40,
-                (Math.random() - 0.5) * 40,
-                (Math.random() - 0.5) * 40
-            );
-            mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, 0);
-            geometries.push(mesh);
-            scene.add(mesh);
-        }
-
         camera.position.z = 30;
 
-        // Mouse interaction
-        let mouseX = 0;
-        let mouseY = 0;
-
-        document.addEventListener('mousemove', (event) => {
-            mouseX = (event.clientX / window.innerWidth) * 2 - 1;
-            mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
-        });
-
-        // Animation loop
         function animate() {
             requestAnimationFrame(animate);
-
             particlesMesh.rotation.y += 0.001;
             particlesMesh.rotation.x += 0.0005;
-
-            geometries.forEach((mesh, i) => {
-                mesh.rotation.x += 0.01 * (i % 2 === 0 ? 1 : -1);
-                mesh.rotation.y += 0.01;
-                mesh.position.y += Math.sin(Date.now() * 0.001 + i) * 0.02;
-            });
-
-            camera.position.x += (mouseX * 2 - camera.position.x) * 0.05;
-            camera.position.y += (mouseY * 2 - camera.position.y) * 0.05;
-
             renderer.render(scene, camera);
         }
-
         animate();
 
-        // Handle resize
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
 
-        // Application Logic
-        let currentPage = 'home-page';
-        let qrTimer = null;
+        // Socket.IO Connection
+        const socket = io();
+        let currentSessionId = null;
+        let sessionStartTime = null;
+        let messageCount = 0;
 
-        function showPage(pageId) {
-            document.querySelectorAll('.page').forEach(page => {
-                page.classList.remove('active');
-            });
-            
-            setTimeout(() => {
-                document.getElementById(pageId).classList.add('active');
-            }, 100);
+        socket.on('connect', () => {
+            console.log('Connected to server');
+            document.getElementById('status-text').textContent = 'Connected';
+            document.getElementById('connection-status').style.background = '#00ff00';
+        });
 
-  
+        socket.on('disconnect', () => {
+            document.getElementById('
