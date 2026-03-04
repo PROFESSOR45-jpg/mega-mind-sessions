@@ -1,0 +1,30 @@
+{
+  "name": "@professor45/mega-mind-sessions",
+  "version": "1.0.0",
+  "description": "Advanced multi-file authentication for WhatsApp Baileys",
+  "main": "index.js",
+  "files": [
+    "lib/",
+    "index.js",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "echo 'Tests not implemented'"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "auth",
+    "session",
+    "multi-file"
+  ],
+  "author": "PROFESSOR45",
+  "license": "MIT",
+  "peerDependencies": {
+    "@whiskeysockets/baileys": "^6.0.0"
+  },
+  "dependencies": {
+    "fs-extra": "^11.2.0"
+  }
+}
+  
