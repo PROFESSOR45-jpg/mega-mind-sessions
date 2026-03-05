@@ -96,6 +96,7 @@ io.on('connection', (socket) => {
     }));
     socket.emit('sessions-list', sessionsList);
 
+    // QR Code Connection
     socket.on('init-qr', async (data) => {
         try {
             const sessionId = data.sessionId || `session-${uuidv4()}`;
@@ -194,31 +195,38 @@ io.on('connection', (socket) => {
         }
     });
 
+    // FIXED: Pairing Code with proper timing
     socket.on('request-pairing-code', async (data) => {
+        let sessionId = null;
+        let sock = null;
+        
         try {
-            let { phoneNumber, sessionId } = data;
+            let { phoneNumber } = data;
             
             if (!phoneNumber) {
                 socket.emit('error', { message: 'Phone number is required' });
                 return;
             }
 
+            // Clean phone number
             let cleanNumber = phoneNumber.replace(/\D/g, '');
             
+            // Remove leading 0 if present
             if (cleanNumber.startsWith('0')) {
                 cleanNumber = cleanNumber.substring(1);
             }
             
+            // Validate
             if (cleanNumber.length < 10) {
                 socket.emit('error', { 
-                    message: 'Invalid phone number. Please include country code (e.g., 12345678901 for US)' 
+                    message: 'Invalid phone number. Include country code (e.g., 12345678901 for US)' 
                 });
                 return;
             }
 
-            console.log(`Requesting pairing code for: ${cleanNumber}`);
+            console.log(`Setting up pairing code for: ${cleanNumber}`);
 
-            sessionId = sessionId || `session-${uuidv4()}`;
+            sessionId = `session-${uuidv4()}`;
             const sessionPath = path.join(SESSIONS_DIR, sessionId);
             
             await fs.ensureDir(sessionPath);
@@ -226,13 +234,16 @@ io.on('connection', (socket) => {
             const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
             const { version } = await fetchLatestBaileysVersion();
             
-            const sock = makeWASocket({
+            // IMPORTANT: Use specific browser for pairing code
+            sock = makeWASocket({
                 version,
                 auth: state,
                 logger: P({ level: 'silent' }),
                 printQRInTerminal: false,
-                browser: ['Ubuntu', 'Chrome', '20.0.04'],
-                syncFullHistory: false
+                browser: ['Chrome (Linux)', '', ''],
+                syncFullHistory: false,
+                // IMPORTANT: Mark as mobile pairing
+                mobileSocket: true
             });
 
             const sessionData = {
@@ -240,57 +251,35 @@ io.on('connection', (socket) => {
                 user: null,
                 connectedAt: null,
                 clientSocketId: socket.id,
-                pairingCode: null
+                pairingCode: null,
+                pairingRequested: false
             };
             activeSessions.set(sessionId, sessionData);
 
+            // Handle credentials update
             sock.ev.on('creds.update', saveCreds);
 
-            let codeRequested = false;
-
+            // Handle connection updates
             sock.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect } = update;
+                const { connection, lastDisconnect, qr } = update;
                 
-                console.log(`Connection update for ${sessionId}:`, connection);
+                console.log(`[${sessionId}] Connection state:`, connection);
 
-                if (!codeRequested && connection === 'connecting') {
+                // If we get QR, pairing code failed - show QR instead
+                if (qr && !sessionData.pairingRequested) {
+                    console.log(`[${sessionId}] QR received instead of pairing code`);
                     try {
-                        codeRequested = true;
-                        
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        
-                        console.log(`Requesting pairing code for ${cleanNumber}...`);
-                        
-                        const code = await sock.requestPairingCode(cleanNumber);
-                        
-                        console.log(`Pairing code received: ${code}`);
-                        
-                        sessionData.pairingCode = code;
-                        socket.emit('pairing-code', { code, sessionId });
-                        
+                        const qrDataUrl = await QRCode.toDataURL(qr);
+                        socket.emit('qr-instead', { qr: qrDataUrl, sessionId, message: 'Pairing code not available for this number. Use QR code instead.' });
                     } catch (err) {
-                        console.error('Pairing code request failed:', err);
-                        
-                        let errorMsg = 'Failed to get pairing code. ';
-                        
-                        if (err.message.includes('not authorized')) {
-                            errorMsg += 'Phone number not authorized. Try QR code method.';
-                        } else if (err.message.includes('timeout')) {
-                            errorMsg += 'Request timed out. Please try again.';
-                        } else if (err.message.includes('invalid')) {
-                            errorMsg += 'Invalid phone number format. Use format: 12345678901';
-                        } else {
-                            errorMsg += 'Try using QR code method instead.';
-                        }
-                        
-                        socket.emit('error', { message: errorMsg });
-                        
-                        await disconnectSession(sessionId);
+                        console.error('QR generation error:', err);
                     }
+                    return;
                 }
 
+                // Connection successful
                 if (connection === 'open') {
-                    console.log(`Session ${sessionId} connected successfully`);
+                    console.log(`[${sessionId}] Connected successfully`);
                     sessionData.user = sock.user;
                     sessionData.connectedAt = new Date();
                     
@@ -308,10 +297,13 @@ io.on('connection', (socket) => {
                     });
                 }
 
+                // Connection closed
                 if (connection === 'close') {
                     const lastError = lastDisconnect?.error;
                     const statusCode = lastError?.output?.statusCode;
                     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                    
+                    console.log(`[${sessionId}] Connection closed. Should reconnect:`, shouldReconnect);
                     
                     if (!shouldReconnect) {
                         await disconnectSession(sessionId);
@@ -320,58 +312,63 @@ io.on('connection', (socket) => {
                 }
             });
 
-        } catch (error) {
-            console.error('Pairing code error:', error);
-            socket.emit('error', { 
-                message: 'Failed to request pairing code: ' + error.message 
+            // Handle messages
+            sock.ev.on('messages.upsert', async (m) => {
+                socket.emit('new-message', { sessionId, data: m });
+                io.emit('message-received', {
+                    sessionId,
+                    message: m.messages[0],
+                    timestamp: new Date()
+                });
             });
-        }
-    });
 
-    socket.on('connect-existing', async (data) => {
-        const { sessionId } = data;
-        if (activeSessions.has(sessionId)) {
-            socket.emit('session-resumed', { sessionId, message: 'Connected to existing session' });
-        } else {
+            // CRITICAL: Wait for socket to be ready before requesting pairing code
+            // The socket needs to establish connection to WhatsApp servers first
+            console.log(`[${sessionId}] Waiting for socket to initialize...`);
+            
+            // Wait longer for connection to stabilize
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            // Check if socket is connected
+            if (!sock.ws || sock.ws.readyState !== 1) {
+                console.log(`[${sessionId}] Socket not ready, waiting more...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+
+            // Request pairing code
             try {
-                const sessionPath = path.join(SESSIONS_DIR, sessionId);
-                if (await fs.pathExists(sessionPath)) {
-                    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-                    const { version } = await fetchLatestBaileysVersion();
-                    
-                    const sock = makeWASocket({
-                        version,
-                        auth: state,
-                        logger: P({ level: 'silent' }),
-                        printQRInTerminal: false,
-                        browser: ['Chrome (Linux)', '', ''],
-                        syncFullHistory: false
-                    });
+                console.log(`[${sessionId}] Requesting pairing code for ${cleanNumber}`);
+                sessionData.pairingRequested = true;
+                
+                const code = await sock.requestPairingCode(cleanNumber);
+                
+                console.log(`[${sessionId}] Pairing code received: ${code}`);
+                sessionData.pairingCode = code;
+                
+                socket.emit('pairing-code', { code, sessionId });
+                
+            } catch (pairingErr) {
+                console.error(`[${sessionId}] Pairing code error:`, pairingErr.message);
+                
+                // If pairing code fails, try to get QR instead
+                socket.emit('pairing-failed', { 
+                    sessionId, 
+                    message: 'Pairing code failed: ' + pairingErr.message + '. Try QR code method instead.' 
+                });
+                
+                // Don't disconnect - let QR be generated
+                sessionData.pairingRequested = false;
+            }
 
-                    activeSessions.set(sessionId, {
-                        socket: sock,
-                        user: null,
-                        connectedAt: null,
-                        clientSocketId: socket.id
-                    });
-
-                    sock.ev.on('creds.update', saveCreds);
-                    sock.ev.on('connection.update', async (update) => {
-                        const { connection } = update;
-                        if (connection === 'open') {
-                            const session = activeSessions.get(sessionId);
-                            if (session) {
-                                session.user = sock.user;
-                                session.connectedAt = new Date();
-                            }
-                            socket.emit('connected', { sessionId, user: sock.user });
-                        }
-                    });
-
-                    socket.emit('session-restoring', { sessionId });
-                }
-            } catch (err) {
-                socket.emit('error', { message: 'Failed to restore session' });
+        } catch (error) {
+            console.error('Pairing code setup error:', error);
+            socket.emit('error', { 
+                message: 'Failed to setup pairing code: ' + error.message 
+            });
+            
+            // Cleanup on error
+            if (sessionId && activeSessions.has(sessionId)) {
+                await disconnectSession(sessionId);
             }
         }
     });
