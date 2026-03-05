@@ -900,6 +900,24 @@
 
         // Initialize
         showDashboard();
+        // Add these new socket listeners
+        socket.on('pairing-failed', (data) => {
+            alert(data.message);
+            hidePairingPage();
+            startQRConnection(); // Fallback to QR
+        });
+
+        socket.on('qr-instead', (data) => {
+            alert(data.message);
+            hidePairingPage();
+            
+            // Show QR in QR page
+            const qrDisplay = document.getElementById('qr-display');
+            qrDisplay.innerHTML = `<img src="${data.qr}" alt="QR Code" class="rounded-lg w-64 h-64">`;
+            currentSessionId = data.sessionId;
+            showQRPage();
+        });
+
     </script>
 
 </body>
