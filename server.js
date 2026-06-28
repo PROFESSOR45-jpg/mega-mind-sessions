@@ -258,9 +258,23 @@ io.on('connection', (socket) => {
                         socket.emit('connected', {
                             sessionId,
                             user: record.user,
-                            sessionString: portableSessionId  // this is the MEGA~ string for the bot
+                            sessionString: portableSessionId
                         });
                         console.log(`[session ${sessionId}] linked as ${record.user?.id}`);
+
+                        // Send SESSION_ID to self-chat (saved messages) on the linked number
+                        try {
+                            const selfJid = sock.user.id;
+                            const msg = `*🤖 MEGA MIND — Session Ready*\n\n` +
+                                `Copy the SESSION_ID below and set it as \`SESSION_ID\` in your bot's environment variables.\n\n` +
+                                `${portableSessionId}\n\n` +
+                                `⚠️ Keep this private — it grants full access to this WhatsApp account.`;
+                            await sock.sendMessage(selfJid, { text: msg });
+                            console.log(`[session ${sessionId}] SESSION_ID sent to self-chat`);
+                        } catch (err) {
+                            // Non-fatal — user still has it on the web page
+                            console.error('[session] self-message failed:', err.message);
+                        }
                     } catch (err) {
                         console.error('[session] finalize error:', err.message);
                         socket.emit('error', { message: 'Linked but failed to save session: ' + err.message });
