@@ -22,7 +22,6 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
     cors: { origin: '*', methods: ['GET', 'POST'] },
-    // FIX: increase ping timeout so Render's free tier sleep doesn't drop sockets immediately
     pingTimeout: 60000,
     pingInterval: 25000,
 });
@@ -31,7 +30,7 @@ const PORT = process.env.PORT || 3000;
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 const RECORDS_DIR = path.join(__dirname, 'records');
 const SESSION_TTL_MS = 60 * 60 * 1000;
-const LINK_TIMEOUT_MS = 90 * 1000;
+const LINK_TIMEOUT_MS = 120 * 1000; // 2 min to account for slow Render cold starts
 
 fs.ensureDirSync(SESSIONS_DIR);
 fs.ensureDirSync(RECORDS_DIR);
@@ -56,11 +55,8 @@ async function writeRecord(sessionId, record) {
 }
 
 async function readRecord(sessionId) {
-    try {
-        return await fs.readJson(recordPath(sessionId));
-    } catch {
-        return null;
-    }
+    try { return await fs.readJson(recordPath(sessionId)); }
+    catch { return null; }
 }
 
 async function deleteRecord(sessionId) {
@@ -79,14 +75,14 @@ async function cleanupExpired() {
         if (!record) continue;
         const age = now - (record.connectedAt || record.createdAt || 0);
         if (age > SESSION_TTL_MS) {
-            await endLiveSocket(sessionId);
+            await killSocket(sessionId);
             await deleteRecord(sessionId);
-            console.log(`[cleanup] expired session removed: ${sessionId}`);
+            console.log(`[cleanup] expired: ${sessionId}`);
         }
     }
 }
 
-async function endLiveSocket(sessionId) {
+async function killSocket(sessionId) {
     const sock = liveSockets.get(sessionId);
     if (sock) {
         try { sock.end?.(undefined); } catch {}
@@ -94,28 +90,30 @@ async function endLiveSocket(sessionId) {
     }
 }
 
-async function buildPortableSessionId(sessionPath) {
+async function buildPortableSession(sessionPath) {
+    // Wait up to 5s for creds.json to appear (creds.update can lag behind connection open)
     const credsPath = path.join(sessionPath, 'creds.json');
+    for (let i = 0; i < 10; i++) {
+        if (await fs.pathExists(credsPath)) break;
+        await new Promise(r => setTimeout(r, 500));
+    }
     const creds = await fs.readJson(credsPath);
-    const encoded = Buffer.from(JSON.stringify(creds)).toString('base64');
-    return `MEGA~${encoded}`;
+    return 'MEGA~' + Buffer.from(JSON.stringify(creds)).toString('base64');
 }
 
 // ---------- REST API ----------
 
 app.get('/session/:id', async (req, res) => {
-    const { id } = req.params;
-    const record = await readRecord(id);
+    const record = await readRecord(req.params.id);
     if (!record) return res.status(404).json({ status: 'not_found' });
     if (record.status !== 'connected') return res.json({ status: record.status || 'pending' });
-    const age = Date.now() - (record.connectedAt || 0);
-    if (age > SESSION_TTL_MS) {
-        await deleteRecord(id);
+    if (Date.now() - (record.connectedAt || 0) > SESSION_TTL_MS) {
+        await deleteRecord(req.params.id);
         return res.status(410).json({ status: 'expired' });
     }
     return res.json({
         status: 'connected',
-        sessionId: id,
+        sessionId: req.params.id,
         session: record.portableSessionId,
         user: record.user || null,
         connectedAt: record.connectedAt
@@ -129,25 +127,27 @@ app.get('/status/:id', async (req, res) => {
 });
 
 app.delete('/session/:id', async (req, res) => {
-    const { id } = req.params;
-    await endLiveSocket(id);
-    await deleteRecord(id);
+    await killSocket(req.params.id);
+    await deleteRecord(req.params.id);
     res.json({ success: true });
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
+app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
 // ---------- Socket.IO ----------
 
 io.on('connection', (socket) => {
-    console.log('Web client connected:', socket.id);
+    console.log('client connected:', socket.id);
 
     let currentSessionId = null;
+    let cancelled = false;
 
     async function startLinking({ method, phoneNumber }) {
-        // Clean up any previous attempt from this socket
+        cancelled = false;
+
+        // Clean up previous attempt from this socket
         if (currentSessionId) {
-            await endLiveSocket(currentSessionId);
+            await killSocket(currentSessionId);
             await deleteRecord(currentSessionId);
         }
 
@@ -158,26 +158,6 @@ io.on('connection', (socket) => {
         await fs.ensureDir(sessionPath);
         await writeRecord(sessionId, { status: 'pending', method, createdAt: Date.now() });
 
-        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-        const { version } = await fetchLatestBaileysVersion();
-
-        const sock = makeWASocket({
-            version,
-            auth: state,
-            logger: P({ level: 'silent' }),
-            printQRInTerminal: false,
-            // FIX: use consistent browser string for both methods
-            browser: ['MEGA MIND', 'Chrome', '3.0.0'],
-            syncFullHistory: false,
-            // FIX: these help with connection stability
-            connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 60000,
-            keepAliveIntervalMs: 10000,
-        });
-
-        liveSockets.set(sessionId, sock);
-        sock.ev.on('creds.update', saveCreds);
-
         let pairingRequested = false;
         let qrCount = 0;
         let retryCount = 0;
@@ -185,15 +165,19 @@ io.on('connection', (socket) => {
         let linked = false;
 
         const linkTimer = setTimeout(async () => {
+            if (linked || cancelled) return;
             const record = await readRecord(sessionId);
             if (record && record.status !== 'connected') {
-                socket.emit('error', { message: 'Linking timed out after 90 seconds. Please try again.' });
-                await endLiveSocket(sessionId);
+                socket.emit('error', { message: 'Timed out waiting for WhatsApp. Please try again.' });
+                await killSocket(sessionId);
                 await deleteRecord(sessionId);
             }
         }, LINK_TIMEOUT_MS);
 
         async function spawnSocket() {
+            if (cancelled) return;
+
+            // Always re-read state from disk (creds may have been partially saved)
             const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
             const { version } = await fetchLatestBaileysVersion();
 
@@ -213,44 +197,55 @@ io.on('connection', (socket) => {
             sock.ev.on('creds.update', saveCreds);
 
             sock.ev.on('connection.update', async (update) => {
+                if (cancelled) return;
                 const { connection, lastDisconnect, qr } = update;
 
-                // QR method: render each new QR (WhatsApp rotates them every ~20s)
+                // ── QR method ──
                 if (qr && method === 'qr') {
                     qrCount++;
                     try {
-                        const qrDataUrl = await QRCode.toDataURL(qr);
-                        socket.emit('qr', { qr: qrDataUrl, sessionId, attempt: qrCount });
-                    } catch (err) {
-                        socket.emit('error', { message: 'Failed to render QR code' });
+                        const dataUrl = await QRCode.toDataURL(qr);
+                        socket.emit('qr', { qr: dataUrl, sessionId, attempt: qrCount });
+                    } catch {
+                        socket.emit('error', { message: 'Failed to render QR code.' });
                     }
                 }
 
-                // Pairing: request code on first QR event (means WA connection is ready)
+                // ── Pairing method ──
+                // Request code on the first QR event — this confirms the WA connection
+                // is live and ready to accept requestPairingCode()
                 if (method === 'pairing' && qr && !pairingRequested) {
                     pairingRequested = true;
                     try {
-                        const clean = phoneNumber.replace(/\D/g, '');
+                        const clean = (phoneNumber || '').replace(/\D/g, '');
                         if (!clean || clean.length < 7) {
-                            socket.emit('error', { message: 'Invalid phone number. Include your country code, digits only.' });
+                            socket.emit('error', { message: 'Invalid phone number. Use country code + digits only, e.g. 254712345678' });
                             return;
                         }
-                        await new Promise((r) => setTimeout(r, 3000));
+                        // 3s delay — Baileys must finish key exchange before pairing code request
+                        await new Promise(r => setTimeout(r, 3000));
+                        if (cancelled) return;
                         const code = await sock.requestPairingCode(clean);
-                        socket.emit('pairing-code', { code, sessionId });
+                        // Format as XXXX-XXXX if 8 chars
+                        const formatted = code.length === 8
+                            ? code.slice(0, 4) + '-' + code.slice(4)
+                            : code;
+                        socket.emit('pairing-code', { code: formatted, sessionId });
                     } catch (err) {
                         pairingRequested = false; // allow retry on next QR event
-                        socket.emit('error', { message: 'Failed to get pairing code: ' + err.message });
+                        console.error('[pairing] requestPairingCode failed:', err.message);
+                        socket.emit('error', { message: 'Could not get pairing code: ' + err.message });
                     }
                 }
 
+                // ── Connected ──
                 if (connection === 'open') {
                     linked = true;
                     clearTimeout(linkTimer);
-                    await new Promise((r) => setTimeout(r, 2000));
 
                     try {
-                        const portableSessionId = await buildPortableSessionId(sessionPath);
+                        // Wait for creds.json to be fully written
+                        const portableSessionId = await buildPortableSession(sessionPath);
                         const record = {
                             status: 'connected',
                             method,
@@ -259,55 +254,56 @@ io.on('connection', (socket) => {
                             portableSessionId
                         };
                         await writeRecord(sessionId, record);
+
                         socket.emit('connected', {
                             sessionId,
                             user: record.user,
-                            sessionString: portableSessionId
+                            sessionString: portableSessionId  // this is the MEGA~ string for the bot
                         });
+                        console.log(`[session ${sessionId}] linked as ${record.user?.id}`);
                     } catch (err) {
-                        socket.emit('error', { message: 'Failed to finalize session: ' + err.message });
+                        console.error('[session] finalize error:', err.message);
+                        socket.emit('error', { message: 'Linked but failed to save session: ' + err.message });
                     }
                 }
 
+                // ── Closed ──
                 if (connection === 'close') {
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    const loggedOut = statusCode === DisconnectReason.loggedOut;
+                    const code = lastDisconnect?.error?.output?.statusCode;
+                    const loggedOut = code === DisconnectReason.loggedOut;
 
                     if (loggedOut) {
                         clearTimeout(linkTimer);
-                        socket.emit('error', { message: 'Logged out by WhatsApp. Please try again.' });
-                        await endLiveSocket(sessionId);
+                        socket.emit('error', { message: 'WhatsApp logged out the session. Please try again.' });
+                        await killSocket(sessionId);
                         await deleteRecord(sessionId);
                         return;
                     }
 
-                    // Already fully linked — ignore transient close
-                    if (linked) return;
+                    if (linked) return; // transient close after success — ignore
 
-                    // Not linked yet — auto retry
+                    // Connection dropped before linking — retry
                     retryCount++;
-                    console.log(`[session ${sessionId}] connection closed (code ${statusCode}), retry ${retryCount}/${MAX_RETRIES}`);
+                    console.log(`[session ${sessionId}] closed (code ${code}), retry ${retryCount}/${MAX_RETRIES}`);
 
                     if (retryCount > MAX_RETRIES) {
                         clearTimeout(linkTimer);
-                        socket.emit('error', { message: `Connection failed after ${MAX_RETRIES} retries. Please try again.` });
-                        await endLiveSocket(sessionId);
+                        socket.emit('error', { message: `Failed to connect after ${MAX_RETRIES} attempts. Please try again.` });
+                        await killSocket(sessionId);
                         await deleteRecord(sessionId);
                         return;
                     }
 
                     socket.emit('status', { message: `Connection dropped — retrying (${retryCount}/${MAX_RETRIES})…` });
-                    pairingRequested = false; // allow pairing code to be re-requested on reconnect
+                    pairingRequested = false;
 
-                    // Back off before retrying
-                    await new Promise((r) => setTimeout(r, retryCount * 2000));
+                    await new Promise(r => setTimeout(r, retryCount * 2000));
+                    if (cancelled) return;
 
-                    try {
-                        await endLiveSocket(sessionId);
-                        await spawnSocket();
-                    } catch (err) {
+                    await killSocket(sessionId);
+                    spawnSocket().catch(err => {
                         socket.emit('error', { message: 'Reconnect failed: ' + err.message });
-                    }
+                    });
                 }
             });
         }
@@ -316,15 +312,15 @@ io.on('connection', (socket) => {
     }
 
     socket.on('start-session', (data) => {
-        startLinking(data).catch((err) => {
+        startLinking(data).catch(err => {
             socket.emit('error', { message: 'Internal error: ' + err.message });
         });
     });
 
-    // FIX: allow client to explicitly cancel/retry
     socket.on('cancel-session', async () => {
+        cancelled = true;
         if (currentSessionId) {
-            await endLiveSocket(currentSessionId);
+            await killSocket(currentSessionId);
             await deleteRecord(currentSessionId);
             currentSessionId = null;
         }
@@ -332,26 +328,21 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
-        console.log('Web client disconnected:', socket.id);
+        console.log('client disconnected:', socket.id);
     });
 });
 
-// ---------- background cleanup ----------
+// ---------- cleanup ----------
 
 setInterval(() => {
-    cleanupExpired().catch((err) => console.error('cleanup error:', err.message));
+    cleanupExpired().catch(err => console.error('cleanup error:', err.message));
 }, 10 * 60 * 1000);
 
 httpServer.listen(PORT, () => {
-    console.log(`\n╔═══════════════════════════════════════════════════╗
-║  MEGA MIND SESSION SERVER                          ║
-║  Port: ${PORT}
-║  REST: GET /session/:id  |  GET /status/:id        ║
-╚═══════════════════════════════════════════════════╝\n`);
+    console.log(`MEGA MIND SESSION SERVER running on port ${PORT}`);
 });
 
 process.on('SIGINT', async () => {
-    console.log('\nShutting down...');
     for (const [, sock] of liveSockets) {
         try { sock.end?.(undefined); } catch {}
     }
