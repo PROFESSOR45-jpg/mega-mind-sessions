@@ -180,6 +180,9 @@ io.on('connection', (socket) => {
 
         let pairingRequested = false;
         let qrCount = 0;
+        let retryCount = 0;
+        const MAX_RETRIES = 3;
+        let linked = false;
 
         const linkTimer = setTimeout(async () => {
             const record = await readRecord(sessionId);
@@ -190,86 +193,126 @@ io.on('connection', (socket) => {
             }
         }, LINK_TIMEOUT_MS);
 
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+        async function spawnSocket() {
+            const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+            const { version } = await fetchLatestBaileysVersion();
 
-            // QR method: render each new QR (WhatsApp rotates them every ~20s)
-            if (qr && method === 'qr') {
-                qrCount++;
-                try {
-                    const qrDataUrl = await QRCode.toDataURL(qr);
-                    socket.emit('qr', { qr: qrDataUrl, sessionId, attempt: qrCount });
-                } catch (err) {
-                    socket.emit('error', { message: 'Failed to render QR code' });
+            const sock = makeWASocket({
+                version,
+                auth: state,
+                logger: P({ level: 'silent' }),
+                printQRInTerminal: false,
+                browser: ['MEGA MIND', 'Chrome', '3.0.0'],
+                syncFullHistory: false,
+                connectTimeoutMs: 60000,
+                defaultQueryTimeoutMs: 60000,
+                keepAliveIntervalMs: 10000,
+            });
+
+            liveSockets.set(sessionId, sock);
+            sock.ev.on('creds.update', saveCreds);
+
+            sock.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect, qr } = update;
+
+                // QR method: render each new QR (WhatsApp rotates them every ~20s)
+                if (qr && method === 'qr') {
+                    qrCount++;
+                    try {
+                        const qrDataUrl = await QRCode.toDataURL(qr);
+                        socket.emit('qr', { qr: qrDataUrl, sessionId, attempt: qrCount });
+                    } catch (err) {
+                        socket.emit('error', { message: 'Failed to render QR code' });
+                    }
                 }
-            }
 
-            // FIX: Pairing code — request as soon as we have a QR event (connection is ready)
-            // but only once. Some Baileys versions need a short delay before requestPairingCode.
-            if (method === 'pairing' && qr && !pairingRequested) {
-                pairingRequested = true;
-                try {
-                    const clean = phoneNumber.replace(/\D/g, '');
-                    if (!clean || clean.length < 7) {
-                        socket.emit('error', { message: 'Invalid phone number. Include your country code, digits only.' });
+                // Pairing: request code on first QR event (means WA connection is ready)
+                if (method === 'pairing' && qr && !pairingRequested) {
+                    pairingRequested = true;
+                    try {
+                        const clean = phoneNumber.replace(/\D/g, '');
+                        if (!clean || clean.length < 7) {
+                            socket.emit('error', { message: 'Invalid phone number. Include your country code, digits only.' });
+                            return;
+                        }
+                        await new Promise((r) => setTimeout(r, 3000));
+                        const code = await sock.requestPairingCode(clean);
+                        socket.emit('pairing-code', { code, sessionId });
+                    } catch (err) {
+                        pairingRequested = false; // allow retry on next QR event
+                        socket.emit('error', { message: 'Failed to get pairing code: ' + err.message });
+                    }
+                }
+
+                if (connection === 'open') {
+                    linked = true;
+                    clearTimeout(linkTimer);
+                    await new Promise((r) => setTimeout(r, 2000));
+
+                    try {
+                        const portableSessionId = await buildPortableSessionId(sessionPath);
+                        const record = {
+                            status: 'connected',
+                            method,
+                            user: sock.user ? { id: sock.user.id, name: sock.user.name } : null,
+                            connectedAt: Date.now(),
+                            portableSessionId
+                        };
+                        await writeRecord(sessionId, record);
+                        socket.emit('connected', {
+                            sessionId,
+                            user: record.user,
+                            sessionString: portableSessionId
+                        });
+                    } catch (err) {
+                        socket.emit('error', { message: 'Failed to finalize session: ' + err.message });
+                    }
+                }
+
+                if (connection === 'close') {
+                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    const loggedOut = statusCode === DisconnectReason.loggedOut;
+
+                    if (loggedOut) {
+                        clearTimeout(linkTimer);
+                        socket.emit('error', { message: 'Logged out by WhatsApp. Please try again.' });
+                        await endLiveSocket(sessionId);
+                        await deleteRecord(sessionId);
                         return;
                     }
-                    // FIX: increased delay to 3s — Baileys needs the socket fully ready
-                    await new Promise((r) => setTimeout(r, 3000));
-                    const code = await sock.requestPairingCode(clean);
-                    socket.emit('pairing-code', { code, sessionId });
-                } catch (err) {
-                    pairingRequested = false; // allow retry on next QR event
-                    socket.emit('error', { message: 'Failed to get pairing code: ' + err.message });
-                }
-            }
 
-            if (connection === 'open') {
-                clearTimeout(linkTimer);
-                await new Promise((r) => setTimeout(r, 2000));
+                    // Already fully linked — ignore transient close
+                    if (linked) return;
 
-                try {
-                    const portableSessionId = await buildPortableSessionId(sessionPath);
-                    const record = {
-                        status: 'connected',
-                        method,
-                        user: sock.user ? { id: sock.user.id, name: sock.user.name } : null,
-                        connectedAt: Date.now(),
-                        portableSessionId
-                    };
-                    await writeRecord(sessionId, record);
-                    socket.emit('connected', {
-                        sessionId,
-                        user: record.user,
-                        sessionString: portableSessionId
-                    });
-                } catch (err) {
-                    socket.emit('error', { message: 'Failed to finalize session: ' + err.message });
-                }
-            }
+                    // Not linked yet — auto retry
+                    retryCount++;
+                    console.log(`[session ${sessionId}] connection closed (code ${statusCode}), retry ${retryCount}/${MAX_RETRIES}`);
 
-            if (connection === 'close') {
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const loggedOut = statusCode === DisconnectReason.loggedOut;
+                    if (retryCount > MAX_RETRIES) {
+                        clearTimeout(linkTimer);
+                        socket.emit('error', { message: `Connection failed after ${MAX_RETRIES} retries. Please try again.` });
+                        await endLiveSocket(sessionId);
+                        await deleteRecord(sessionId);
+                        return;
+                    }
 
-                if (loggedOut) {
-                    clearTimeout(linkTimer);
-                    socket.emit('error', { message: 'Logged out by WhatsApp. Please try again.' });
-                    await endLiveSocket(sessionId);
-                    await deleteRecord(sessionId);
-                }
-                // FIX: for non-logout closes, notify client so they know connection dropped
-                else {
-                    const reason = lastDisconnect?.error?.message || 'Connection dropped';
-                    console.log(`[session ${sessionId}] connection closed: ${reason} (code ${statusCode})`);
-                    // Baileys will attempt to reconnect internally — only alert if we're still pending
-                    const record = await readRecord(sessionId);
-                    if (record && record.status !== 'connected') {
-                        socket.emit('status', { message: 'Connection interrupted, retrying…' });
+                    socket.emit('status', { message: `Connection dropped — retrying (${retryCount}/${MAX_RETRIES})…` });
+                    pairingRequested = false; // allow pairing code to be re-requested on reconnect
+
+                    // Back off before retrying
+                    await new Promise((r) => setTimeout(r, retryCount * 2000));
+
+                    try {
+                        await endLiveSocket(sessionId);
+                        await spawnSocket();
+                    } catch (err) {
+                        socket.emit('error', { message: 'Reconnect failed: ' + err.message });
                     }
                 }
-            }
-        });
+            });
+        }
+
+        await spawnSocket();
     }
 
     socket.on('start-session', (data) => {
