@@ -1,22 +1,20 @@
 {
   "name": "mega-mind-sessions",
-  "version": "2.0.0",
-  "description": "Multi-Device WhatsApp Session Manager",
+  "version": "3.0.0",
+  "description": "Standalone WhatsApp session linking service for MEGA MIND bot (QR + pairing code)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.7.2",
-    "@whiskeysockets/baileys": "^6.6.0",
-    "qrcode": "^1.5.3",
-    "pino": "^8.16.0",
-    "@hapi/boom": "^10.0.1",
-    "fs-extra": "^11.1.1",
-    "uuid": "^9.0.0"
-  },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "qrcode": "^1.5.3",
+    "pino": "^8.16.0",
+    "fs-extra": "^11.2.0"
   }
 }

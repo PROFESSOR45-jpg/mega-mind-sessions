@@ -1,415 +1,323 @@
+/**
+ * MEGA MIND SESSION SERVER
+ * Standalone session generator (QR + Pairing Code) for MEGA MIND WhatsApp Bot.
+ *
+ * This app is intentionally separate from the bot. It only knows how to:
+ *   1. Walk a user through linking WhatsApp (QR or pairing code)
+ *   2. Produce a portable SESSION_ID (base64 creds) once linked
+ *   3. Serve that SESSION_ID back to a bot instance over a simple REST API
+ *
+ * The bot (MEGA-MIND) talks to this service over HTTP using SESSION_SERVER_URL.
+ * Nothing here imports or depends on the bot's code, and vice versa.
+ */
+
 const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
-const { 
-    makeWASocket, 
-    useMultiFileAuthState, 
+const {
+    makeWASocket,
+    useMultiFileAuthState,
     DisconnectReason,
-    fetchLatestBaileysVersion 
+    fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
 const P = require('pino');
 const QRCode = require('qrcode');
 const fs = require('fs-extra');
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
 const PORT = process.env.PORT || 3000;
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
+const RECORDS_DIR = path.join(__dirname, 'records'); // persisted metadata, survives restarts
+const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour — how long a finished session stays fetchable
+const LINK_TIMEOUT_MS = 90 * 1000; // how long a QR/pairing attempt can stay unlinked before cleanup
 
 fs.ensureDirSync(SESSIONS_DIR);
+fs.ensureDirSync(RECORDS_DIR);
 
-const activeSessions = new Map();
+// In-memory map of live Baileys sockets keyed by our own sessionId (not WA's).
+// Lost on restart, which is fine — record files on disk are the source of truth
+// for "is this session ready to hand to a bot", not the live socket.
+const liveSockets = new Map();
 
+app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/api/sessions', async (req, res) => {
-    try {
-        const sessions = [];
-        const sessionFolders = await fs.readdir(SESSIONS_DIR);
-        
-        for (const sessionId of sessionFolders.filter(s => !s.startsWith('.'))) {
-            const sessionData = activeSessions.get(sessionId);
-            sessions.push({
-                id: sessionId,
-                status: sessionData ? 'connected' : 'disconnected',
-                user: sessionData?.user || null,
-                connectedAt: sessionData?.connectedAt || null,
-                phone: sessionData?.user?.id?.split(':')[0] || null
-            });
-        }
-        
-        res.json(sessions);
-    } catch (err) {
-        res.json([]);
-    }
-});
+// ---------- helpers ----------
 
-app.delete('/api/sessions/:sessionId', async (req, res) => {
-    const { sessionId } = req.params;
-    try {
-        await disconnectSession(sessionId);
-        res.json({ success: true, message: 'Session deleted' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-async function disconnectSession(sessionId) {
-    if (activeSessions.has(sessionId)) {
-        const session = activeSessions.get(sessionId);
-        try {
-            await session.socket.logout();
-        } catch (e) {
-            console.log('Logout error:', e.message);
-        }
-        activeSessions.delete(sessionId);
-    }
-    
-    const sessionPath = path.join(SESSIONS_DIR, sessionId);
-    try {
-        await fs.remove(sessionPath);
-    } catch (e) {
-        console.log('Remove session folder error:', e.message);
-    }
-    
-    return true;
+function newSessionId() {
+    return 'MM_' + crypto.randomBytes(12).toString('hex');
 }
 
-io.on('connection', (socket) => {
-    console.log('Client connected:', socket.id);
+function recordPath(sessionId) {
+    return path.join(RECORDS_DIR, `${sessionId}.json`);
+}
 
-    const sessionsList = Array.from(activeSessions.entries()).map(([id, data]) => ({
-        id,
+async function writeRecord(sessionId, record) {
+    await fs.writeJson(recordPath(sessionId), record, { spaces: 2 });
+}
+
+async function readRecord(sessionId) {
+    try {
+        return await fs.readJson(recordPath(sessionId));
+    } catch {
+        return null;
+    }
+}
+
+async function deleteRecord(sessionId) {
+    await fs.remove(recordPath(sessionId)).catch(() => {});
+    await fs.remove(path.join(SESSIONS_DIR, sessionId)).catch(() => {});
+}
+
+async function cleanupExpired() {
+    let files = [];
+    try {
+        files = await fs.readdir(RECORDS_DIR);
+    } catch {
+        return;
+    }
+    const now = Date.now();
+    for (const file of files) {
+        if (!file.endsWith('.json')) continue;
+        const sessionId = file.replace(/\.json$/, '');
+        const record = await readRecord(sessionId);
+        if (!record) continue;
+        const age = now - (record.connectedAt || record.createdAt || 0);
+        if (age > SESSION_TTL_MS) {
+            await endLiveSocket(sessionId);
+            await deleteRecord(sessionId);
+            console.log(`[cleanup] expired session removed: ${sessionId}`);
+        }
+    }
+}
+
+async function endLiveSocket(sessionId) {
+    const sock = liveSockets.get(sessionId);
+    if (sock) {
+        try { sock.end?.(undefined); } catch {}
+        liveSockets.delete(sessionId);
+    }
+}
+
+/**
+ * Build the portable SESSION_ID string the bot will use.
+ * It's just the creds.json contents, base64-encoded, prefixed so the bot
+ * can sanity-check the format before trying to parse it.
+ */
+async function buildPortableSessionId(sessionPath) {
+    const credsPath = path.join(sessionPath, 'creds.json');
+    const creds = await fs.readJson(credsPath);
+    const encoded = Buffer.from(JSON.stringify(creds)).toString('base64');
+    return `MEGA~${encoded}`;
+}
+
+// ---------- REST API (used by the bot) ----------
+
+/**
+ * GET /session/:id
+ * The bot polls this after a user has linked via the web UI.
+ * Returns { status: 'connected', session: '<portable id>' } once ready,
+ * or { status: 'pending' | 'not_found' | 'expired' }.
+ */
+app.get('/session/:id', async (req, res) => {
+    const { id } = req.params;
+    const record = await readRecord(id);
+
+    if (!record) {
+        return res.status(404).json({ status: 'not_found' });
+    }
+
+    if (record.status !== 'connected') {
+        return res.json({ status: record.status || 'pending' });
+    }
+
+    const age = Date.now() - (record.connectedAt || 0);
+    if (age > SESSION_TTL_MS) {
+        await deleteRecord(id);
+        return res.status(410).json({ status: 'expired' });
+    }
+
+    return res.json({
         status: 'connected',
-        user: data.user,
-        connectedAt: data.connectedAt
-    }));
-    socket.emit('sessions-list', sessionsList);
+        sessionId: id,
+        session: record.portableSessionId,
+        user: record.user || null,
+        connectedAt: record.connectedAt
+    });
+});
 
-    // QR Code Connection
-    socket.on('init-qr', async (data) => {
-        try {
-            const sessionId = data.sessionId || `session-${uuidv4()}`;
-            const sessionPath = path.join(SESSIONS_DIR, sessionId);
-            
-            await fs.ensureDir(sessionPath);
-            
-            const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-            const { version } = await fetchLatestBaileysVersion();
-            
-            const sock = makeWASocket({
-                version,
-                auth: state,
-                logger: P({ level: 'silent' }),
-                printQRInTerminal: false,
-                browser: ['Chrome (Linux)', '', ''],
-                syncFullHistory: false
-            });
+/**
+ * GET /status/:id — lightweight status check, no session payload.
+ */
+app.get('/status/:id', async (req, res) => {
+    const record = await readRecord(req.params.id);
+    if (!record) return res.status(404).json({ status: 'not_found' });
+    res.json({ status: record.status, connectedAt: record.connectedAt || null });
+});
 
-            const sessionData = {
-                socket: sock,
-                user: null,
-                connectedAt: null,
-                clientSocketId: socket.id,
-                qrTimeout: null
-            };
-            activeSessions.set(sessionId, sessionData);
+/**
+ * DELETE /session/:id — let a bot (or the web UI) explicitly revoke a session
+ * once it's been picked up, so it can't be reused if it ever leaked.
+ */
+app.delete('/session/:id', async (req, res) => {
+    const { id } = req.params;
+    await endLiveSocket(id);
+    await deleteRecord(id);
+    res.json({ success: true });
+});
 
-            sock.ev.on('creds.update', saveCreds);
+app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
-            sock.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, qr } = update;
+// ---------- Socket.IO (used by the browser pairing UI) ----------
 
-                if (qr) {
-                    try {
-                        const qrDataUrl = await QRCode.toDataURL(qr);
-                        socket.emit('qr', { qr: qrDataUrl, sessionId });
-                        
-                        if (sessionData.qrTimeout) clearTimeout(sessionData.qrTimeout);
-                        sessionData.qrTimeout = setTimeout(() => {
-                            socket.emit('qr-expired', { sessionId });
-                        }, 60000);
-                    } catch (err) {
-                        console.error('QR generation error:', err);
-                    }
+io.on('connection', (socket) => {
+    console.log('Web client connected:', socket.id);
+
+    let currentSessionId = null;
+
+    async function startLinking({ method, phoneNumber }) {
+        const sessionId = newSessionId();
+        currentSessionId = sessionId;
+        const sessionPath = path.join(SESSIONS_DIR, sessionId);
+
+        await fs.ensureDir(sessionPath);
+        await writeRecord(sessionId, { status: 'pending', method, createdAt: Date.now() });
+
+        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+        const { version } = await fetchLatestBaileysVersion();
+
+        const sock = makeWASocket({
+            version,
+            auth: state,
+            logger: P({ level: 'silent' }),
+            printQRInTerminal: false,
+            browser: method === 'pairing'
+                ? ['Chrome (Linux)', 'Chrome', '1.0.0']
+                : ['MEGA MIND', 'Chrome', '3.0.0'],
+            syncFullHistory: false
+        });
+
+        liveSockets.set(sessionId, sock);
+        sock.ev.on('creds.update', saveCreds);
+
+        let pairingRequested = false;
+        let linkTimer = setTimeout(async () => {
+            const record = await readRecord(sessionId);
+            if (record && record.status !== 'connected') {
+                socket.emit('error', { message: 'Linking timed out. Please try again.' });
+                await endLiveSocket(sessionId);
+                await deleteRecord(sessionId);
+            }
+        }, LINK_TIMEOUT_MS);
+
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr && method === 'qr') {
+                try {
+                    const qrDataUrl = await QRCode.toDataURL(qr);
+                    socket.emit('qr', { qr: qrDataUrl, sessionId });
+                } catch (err) {
+                    socket.emit('error', { message: 'Failed to render QR code' });
                 }
+            }
 
-                if (connection === 'open') {
-                    console.log(`Session ${sessionId} connected`);
-                    sessionData.user = sock.user;
-                    sessionData.connectedAt = new Date();
-                    if (sessionData.qrTimeout) clearTimeout(sessionData.qrTimeout);
-                    
-                    socket.emit('connected', { 
-                        sessionId, 
-                        user: sock.user,
-                        message: 'Successfully connected to WhatsApp!'
-                    });
-                    
-                    io.emit('session-updated', {
-                        id: sessionId,
+            if (method === 'pairing' && !pairingRequested && qr) {
+                pairingRequested = true;
+                try {
+                    const clean = phoneNumber.replace(/\D/g, '');
+                    await new Promise((r) => setTimeout(r, 1500)); // let the socket settle
+                    const code = await sock.requestPairingCode(clean);
+                    socket.emit('pairing-code', { code, sessionId });
+                } catch (err) {
+                    socket.emit('error', { message: 'Failed to get pairing code: ' + err.message });
+                    pairingRequested = false;
+                }
+            }
+
+            if (connection === 'open') {
+                clearTimeout(linkTimer);
+                await new Promise((r) => setTimeout(r, 2000)); // let creds.json fully settle
+
+                try {
+                    const portableSessionId = await buildPortableSessionId(sessionPath);
+                    const record = {
                         status: 'connected',
-                        user: sock.user,
-                        connectedAt: sessionData.connectedAt
+                        method,
+                        user: sock.user ? { id: sock.user.id, name: sock.user.name } : null,
+                        connectedAt: Date.now(),
+                        portableSessionId
+                    };
+                    await writeRecord(sessionId, record);
+
+                    socket.emit('connected', {
+                        sessionId,
+                        user: record.user,
+                        sessionString: portableSessionId
                     });
+                } catch (err) {
+                    socket.emit('error', { message: 'Failed to finalize session: ' + err.message });
                 }
+            }
 
-                if (connection === 'close') {
-                    const lastError = lastDisconnect?.error;
-                    const statusCode = lastError?.output?.statusCode;
-                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                    
-                    if (shouldReconnect) {
-                        socket.emit('reconnecting', { sessionId, message: 'Reconnecting...' });
-                    } else {
-                        socket.emit('disconnected', { sessionId, message: 'Logged out' });
-                        await disconnectSession(sessionId);
-                        io.emit('session-removed', { sessionId });
-                    }
+            if (connection === 'close') {
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const loggedOut = statusCode === DisconnectReason.loggedOut;
+
+                if (loggedOut) {
+                    clearTimeout(linkTimer);
+                    socket.emit('error', { message: 'Session ended. Please try again.' });
+                    await endLiveSocket(sessionId);
+                    await deleteRecord(sessionId);
                 }
-            });
-
-            sock.ev.on('messages.upsert', async (m) => {
-                console.log(`New message in session ${sessionId}`);
-                socket.emit('new-message', { sessionId, data: m });
-                io.emit('message-received', {
-                    sessionId,
-                    message: m.messages[0],
-                    timestamp: new Date()
-                });
-            });
-
-        } catch (error) {
-            console.error('QR Init error:', error);
-            socket.emit('error', { message: 'Failed to initialize QR: ' + error.message });
-        }
-    });
-
-    // FIXED: Pairing Code with proper timing
-    socket.on('request-pairing-code', async (data) => {
-        let sessionId = null;
-        let sock = null;
-        
-        try {
-            let { phoneNumber } = data;
-            
-            if (!phoneNumber) {
-                socket.emit('error', { message: 'Phone number is required' });
-                return;
+                // Non-logout closes during linking are usually transient
+                // (e.g. reconnect after QR scan); Baileys/the socket handles retry
+                // internally up to the point of 'open' or a real logout.
             }
+        });
+    }
 
-            // Clean phone number
-            let cleanNumber = phoneNumber.replace(/\D/g, '');
-            
-            // Remove leading 0 if present
-            if (cleanNumber.startsWith('0')) {
-                cleanNumber = cleanNumber.substring(1);
-            }
-            
-            // Validate
-            if (cleanNumber.length < 10) {
-                socket.emit('error', { 
-                    message: 'Invalid phone number. Include country code (e.g., 12345678901 for US)' 
-                });
-                return;
-            }
-
-            console.log(`Setting up pairing code for: ${cleanNumber}`);
-
-            sessionId = `session-${uuidv4()}`;
-            const sessionPath = path.join(SESSIONS_DIR, sessionId);
-            
-            await fs.ensureDir(sessionPath);
-            
-            const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-            const { version } = await fetchLatestBaileysVersion();
-            
-            // IMPORTANT: Use specific browser for pairing code
-            sock = makeWASocket({
-                version,
-                auth: state,
-                logger: P({ level: 'silent' }),
-                printQRInTerminal: false,
-                browser: ['Chrome (Linux)', '', ''],
-                syncFullHistory: false,
-                // IMPORTANT: Mark as mobile pairing
-                mobileSocket: true
-            });
-
-            const sessionData = {
-                socket: sock,
-                user: null,
-                connectedAt: null,
-                clientSocketId: socket.id,
-                pairingCode: null,
-                pairingRequested: false
-            };
-            activeSessions.set(sessionId, sessionData);
-
-            // Handle credentials update
-            sock.ev.on('creds.update', saveCreds);
-
-            // Handle connection updates
-            sock.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, qr } = update;
-                
-                console.log(`[${sessionId}] Connection state:`, connection);
-
-                // If we get QR, pairing code failed - show QR instead
-                if (qr && !sessionData.pairingRequested) {
-                    console.log(`[${sessionId}] QR received instead of pairing code`);
-                    try {
-                        const qrDataUrl = await QRCode.toDataURL(qr);
-                        socket.emit('qr-instead', { qr: qrDataUrl, sessionId, message: 'Pairing code not available for this number. Use QR code instead.' });
-                    } catch (err) {
-                        console.error('QR generation error:', err);
-                    }
-                    return;
-                }
-
-                // Connection successful
-                if (connection === 'open') {
-                    console.log(`[${sessionId}] Connected successfully`);
-                    sessionData.user = sock.user;
-                    sessionData.connectedAt = new Date();
-                    
-                    socket.emit('connected', { 
-                        sessionId, 
-                        user: sock.user,
-                        message: 'Successfully connected to WhatsApp!'
-                    });
-                    
-                    io.emit('session-updated', {
-                        id: sessionId,
-                        status: 'connected',
-                        user: sock.user,
-                        connectedAt: sessionData.connectedAt
-                    });
-                }
-
-                // Connection closed
-                if (connection === 'close') {
-                    const lastError = lastDisconnect?.error;
-                    const statusCode = lastError?.output?.statusCode;
-                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                    
-                    console.log(`[${sessionId}] Connection closed. Should reconnect:`, shouldReconnect);
-                    
-                    if (!shouldReconnect) {
-                        await disconnectSession(sessionId);
-                        io.emit('session-removed', { sessionId });
-                    }
-                }
-            });
-
-            // Handle messages
-            sock.ev.on('messages.upsert', async (m) => {
-                socket.emit('new-message', { sessionId, data: m });
-                io.emit('message-received', {
-                    sessionId,
-                    message: m.messages[0],
-                    timestamp: new Date()
-                });
-            });
-
-            // CRITICAL: Wait for socket to be ready before requesting pairing code
-            // The socket needs to establish connection to WhatsApp servers first
-            console.log(`[${sessionId}] Waiting for socket to initialize...`);
-            
-            // Wait longer for connection to stabilize
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            
-            // Check if socket is connected
-            if (!sock.ws || sock.ws.readyState !== 1) {
-                console.log(`[${sessionId}] Socket not ready, waiting more...`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-            }
-
-            // Request pairing code
-            try {
-                console.log(`[${sessionId}] Requesting pairing code for ${cleanNumber}`);
-                sessionData.pairingRequested = true;
-                
-                const code = await sock.requestPairingCode(cleanNumber);
-                
-                console.log(`[${sessionId}] Pairing code received: ${code}`);
-                sessionData.pairingCode = code;
-                
-                socket.emit('pairing-code', { code, sessionId });
-                
-            } catch (pairingErr) {
-                console.error(`[${sessionId}] Pairing code error:`, pairingErr.message);
-                
-                // If pairing code fails, try to get QR instead
-                socket.emit('pairing-failed', { 
-                    sessionId, 
-                    message: 'Pairing code failed: ' + pairingErr.message + '. Try QR code method instead.' 
-                });
-                
-                // Don't disconnect - let QR be generated
-                sessionData.pairingRequested = false;
-            }
-
-        } catch (error) {
-            console.error('Pairing code setup error:', error);
-            socket.emit('error', { 
-                message: 'Failed to setup pairing code: ' + error.message 
-            });
-            
-            // Cleanup on error
-            if (sessionId && activeSessions.has(sessionId)) {
-                await disconnectSession(sessionId);
-            }
-        }
-    });
-
-    socket.on('disconnect-session', async (data) => {
-        const { sessionId } = data;
-        await disconnectSession(sessionId);
-        socket.emit('disconnected', { sessionId });
-        io.emit('session-removed', { sessionId });
-    });
-
-    socket.on('get-sessions', () => {
-        const sessions = Array.from(activeSessions.entries()).map(([id, data]) => ({
-            id,
-            status: 'connected',
-            user: data.user,
-            connectedAt: data.connectedAt
-        }));
-        socket.emit('sessions-list', sessions);
-    });
-
-    socket.on('switch-session', (data) => {
-        const { sessionId } = data;
-        if (activeSessions.has(sessionId)) {
-            const session = activeSessions.get(sessionId);
-            socket.emit('session-switched', {
-                sessionId,
-                user: session.user,
-                connectedAt: session.connectedAt
-            });
-        } else {
-            socket.emit('error', { message: 'Session not found' });
-        }
+    socket.on('start-session', (data) => {
+        startLinking(data).catch((err) => {
+            socket.emit('error', { message: 'Internal error: ' + err.message });
+        });
     });
 
     socket.on('disconnect', () => {
-        console.log('Client disconnected:', socket.id);
+        console.log('Web client disconnected:', socket.id);
+        // Intentionally do NOT kill the WA socket here — the user may have
+        // already scanned/paired and just closed the tab. The link should
+        // still complete and become fetchable via the REST API.
     });
 });
 
+// ---------- background cleanup ----------
+
+setInterval(() => {
+    cleanupExpired().catch((err) => console.error('cleanup error:', err.message));
+}, 10 * 60 * 1000);
+
 httpServer.listen(PORT, () => {
-    console.log(`Multi-Device WhatsApp Server running on port ${PORT}`);
-    console.log(`Open http://localhost:${PORT} to view the app`);
+    console.log(`
+╔═══════════════════════════════════════════════════╗
+║  MEGA MIND SESSION SERVER                          ║
+║  Port: ${PORT}
+║  REST: GET /session/:id  |  GET /status/:id        ║
+╚═══════════════════════════════════════════════════╝
+    `);
+});
+
+process.on('SIGINT', async () => {
+    console.log('\nShutting down session server...');
+    for (const [id, sock] of liveSockets) {
+        try { sock.end?.(undefined); } catch {}
+    }
+    httpServer.close(() => process.exit(0));
 });
