@@ -15,6 +15,7 @@
     --text: #d8f3e6;
     --text-dim: #6f8e80;
     --danger: #ff5c5c;
+    --warn: #f5c842;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -47,174 +48,85 @@
     margin: 6px;
     pointer-events: none;
   }
-  .head {
-    padding: 22px 24px 16px;
-    border-bottom: 1px solid var(--line);
-  }
-  .head .tag {
-    font-size: 11px;
-    letter-spacing: 3px;
-    color: var(--signal);
-    text-transform: uppercase;
-  }
-  .head h1 {
-    font-size: 20px;
-    letter-spacing: 1px;
-    margin-top: 6px;
-    font-weight: 600;
-  }
-  .head p {
-    color: var(--text-dim);
-    font-size: 13px;
-    margin-top: 6px;
-    line-height: 1.5;
-  }
+  .head { padding: 22px 24px 16px; border-bottom: 1px solid var(--line); }
+  .head .tag { font-size: 11px; letter-spacing: 3px; color: var(--signal); text-transform: uppercase; }
+  .head h1 { font-size: 20px; letter-spacing: 1px; margin-top: 6px; font-weight: 600; }
+  .head p { color: var(--text-dim); font-size: 13px; margin-top: 6px; line-height: 1.5; }
   .body { padding: 24px; }
-  .tabs {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 20px;
-  }
+  .tabs { display: flex; gap: 8px; margin-bottom: 20px; }
   .tab {
-    flex: 1;
-    padding: 10px 0;
-    text-align: center;
-    border: 1px solid var(--line);
-    background: transparent;
-    color: var(--text-dim);
-    font-family: inherit;
-    font-size: 12px;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: 0.15s;
+    flex: 1; padding: 10px 0; text-align: center;
+    border: 1px solid var(--line); background: transparent;
+    color: var(--text-dim); font-family: inherit; font-size: 12px;
+    letter-spacing: 1.5px; text-transform: uppercase; cursor: pointer; transition: 0.15s;
   }
-  .tab.active {
-    border-color: var(--signal);
-    color: var(--signal);
-    background: rgba(52,245,163,0.06);
-  }
+  .tab.active { border-color: var(--signal); color: var(--signal); background: rgba(52,245,163,0.06); }
   .pane { display: none; }
   .pane.active { display: block; }
-
   .field { margin-bottom: 14px; }
-  .field label {
-    display: block;
-    font-size: 11px;
-    color: var(--text-dim);
-    letter-spacing: 1px;
-    margin-bottom: 6px;
-    text-transform: uppercase;
-  }
+  .field label { display: block; font-size: 11px; color: var(--text-dim); letter-spacing: 1px; margin-bottom: 6px; text-transform: uppercase; }
   .field input {
-    width: 100%;
-    background: #060807;
-    border: 1px solid var(--line);
-    color: var(--text);
-    padding: 11px 12px;
-    font-family: inherit;
-    font-size: 14px;
-    outline: none;
+    width: 100%; background: #060807; border: 1px solid var(--line);
+    color: var(--text); padding: 11px 12px; font-family: inherit; font-size: 14px; outline: none;
   }
   .field input:focus { border-color: var(--signal); }
-
   .btn {
-    width: 100%;
-    background: var(--signal);
-    color: #042417;
-    border: none;
-    padding: 12px 0;
-    font-family: inherit;
-    font-weight: 600;
-    font-size: 13px;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: 0.15s;
+    width: 100%; background: var(--signal); color: #042417;
+    border: none; padding: 12px 0; font-family: inherit; font-weight: 600;
+    font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase; cursor: pointer; transition: 0.15s;
   }
   .btn:hover { filter: brightness(1.1); }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
+  .btn-cancel {
+    width: 100%; background: transparent; border: 1px solid var(--danger);
+    color: var(--danger); padding: 9px 0; font-family: inherit; font-size: 12px;
+    letter-spacing: 1px; text-transform: uppercase; cursor: pointer; margin-top: 10px;
+  }
   .stage { display: none; text-align: center; padding-top: 6px; }
   .stage.active { display: block; }
-
-  .qr-box {
-    background: #fff;
-    padding: 16px;
-    display: inline-block;
-    margin: 6px 0 14px;
-  }
+  .qr-box { background: #fff; padding: 16px; display: inline-block; margin: 6px 0 14px; }
   .qr-box img { width: 220px; height: 220px; display: block; }
-
+  .qr-hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
   .pair-code {
-    font-size: 30px;
-    letter-spacing: 6px;
-    color: var(--signal);
-    border: 1px dashed var(--signal-dim);
-    padding: 16px 10px;
-    margin: 10px 0 14px;
-    font-weight: 600;
+    font-size: 30px; letter-spacing: 6px; color: var(--signal);
+    border: 1px dashed var(--signal-dim); padding: 16px 10px; margin: 10px 0 14px; font-weight: 600;
   }
-
   .spin {
-    width: 34px; height: 34px;
-    border: 3px solid var(--line);
-    border-top-color: var(--signal);
-    border-radius: 50%;
-    margin: 10px auto 16px;
-    animation: spin 0.9s linear infinite;
+    width: 34px; height: 34px; border: 3px solid var(--line);
+    border-top-color: var(--signal); border-radius: 50%;
+    margin: 10px auto 16px; animation: spin 0.9s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-
   .hint { color: var(--text-dim); font-size: 12.5px; line-height: 1.6; }
-
-  .session-out {
-    margin-top: 16px;
-    text-align: left;
-  }
+  .session-out { margin-top: 16px; text-align: left; }
   .session-out textarea {
-    width: 100%;
-    height: 90px;
-    background: #060807;
-    border: 1px solid var(--signal-dim);
-    color: var(--signal);
-    font-family: inherit;
-    font-size: 11px;
-    padding: 10px;
-    resize: none;
+    width: 100%; height: 90px; background: #060807;
+    border: 1px solid var(--signal-dim); color: var(--signal);
+    font-family: inherit; font-size: 11px; padding: 10px; resize: none;
   }
   .copy-btn {
-    margin-top: 8px;
-    background: transparent;
-    border: 1px solid var(--signal);
-    color: var(--signal);
-    padding: 8px 0;
-    width: 100%;
-    font-family: inherit;
-    font-size: 12px;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    cursor: pointer;
+    margin-top: 8px; background: transparent; border: 1px solid var(--signal);
+    color: var(--signal); padding: 8px 0; width: 100%; font-family: inherit;
+    font-size: 12px; letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
   }
-
   .status-line {
-    margin-top: 14px;
-    font-size: 12.5px;
-    padding: 9px 10px;
-    border-left: 2px solid var(--signal-dim);
-    color: var(--text-dim);
-    display: none;
+    margin-top: 14px; font-size: 12.5px; padding: 9px 10px;
+    border-left: 2px solid var(--signal-dim); color: var(--text-dim); display: none;
   }
   .status-line.error { border-left-color: var(--danger); color: var(--danger); display: block; }
   .status-line.ok { border-left-color: var(--signal); color: var(--signal); display: block; }
-
+  .status-line.warn { border-left-color: var(--warn); color: var(--warn); display: block; }
+  .status-line.info { border-left-color: var(--signal-dim); color: var(--text-dim); display: block; }
+  .conn-badge {
+    position: absolute; top: 14px; right: 16px;
+    font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+    padding: 3px 8px; border: 1px solid var(--line); color: var(--text-dim);
+  }
+  .conn-badge.connected { border-color: var(--signal); color: var(--signal); }
+  .conn-badge.disconnected { border-color: var(--danger); color: var(--danger); }
   .foot {
-    padding: 14px 24px;
-    border-top: 1px solid var(--line);
-    font-size: 11px;
-    color: var(--text-dim);
-    text-align: center;
-    letter-spacing: 0.5px;
+    padding: 14px 24px; border-top: 1px solid var(--line);
+    font-size: 11px; color: var(--text-dim); text-align: center; letter-spacing: 0.5px;
   }
 </style>
 </head>
@@ -224,7 +136,8 @@
   <div class="head">
     <div class="tag">MEGA MIND // SESSION SERVER</div>
     <h1>Link your WhatsApp</h1>
-    <p>Generates a session your bot uses to log in. The session stays here for one hour after linking so your bot can pick it up — link, deploy, done.</p>
+    <p>Generates a session your bot uses to log in. Copy the SESSION_ID once linked and paste it into your bot's env vars.</p>
+    <span class="conn-badge" id="conn-badge">connecting…</span>
   </div>
 
   <div class="body">
@@ -241,14 +154,16 @@
       </div>
       <div class="stage" data-stage="qr-loading">
         <div class="spin"></div>
-        <p class="hint">Requesting QR code…</p>
+        <p class="hint">Connecting to WhatsApp…</p>
       </div>
       <div class="stage" data-stage="qr-show" style="text-align:center;">
         <div class="qr-box"><img id="qr-img" src="" alt="QR code"></div>
-        <p class="hint">Scan within 90 seconds.</p>
+        <p class="hint">Scan within 90 seconds. QR refreshes automatically.</p>
+        <p class="qr-hint" id="qr-attempt"></p>
+        <button class="btn-cancel" id="btn-cancel-qr">Cancel &amp; Start Over</button>
       </div>
       <div class="stage" data-stage="qr-done">
-        <p class="hint" style="color:var(--signal);">Linked. Copy your session below.</p>
+        <p class="hint" style="color:var(--signal);">✓ Linked. Copy your session below.</p>
       </div>
     </div>
 
@@ -256,22 +171,23 @@
     <div class="pane" id="pane-pairing">
       <div class="stage active" data-stage="pair-idle">
         <div class="field">
-          <label>Phone number (with country code)</label>
-          <input type="text" id="phone-input" placeholder="e.g. 254712345678">
+          <label>Phone number (with country code, digits only)</label>
+          <input type="tel" id="phone-input" placeholder="e.g. 254712345678">
         </div>
         <button class="btn" id="btn-start-pairing">Get Pairing Code</button>
-        <p class="hint" style="margin-top:10px;">Open WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number instead, then enter the code shown here.</p>
+        <p class="hint" style="margin-top:10px;">Open WhatsApp → Settings → Linked Devices → Link a Device → <em>Link with phone number instead</em>, then enter the code shown here.</p>
       </div>
       <div class="stage" data-stage="pair-loading">
         <div class="spin"></div>
-        <p class="hint">Requesting pairing code…</p>
+        <p class="hint">Requesting pairing code — this can take up to 10 seconds…</p>
       </div>
       <div class="stage" data-stage="pair-show" style="text-align:center;">
         <div class="pair-code" id="pair-code-text">— — — —</div>
         <p class="hint">Enter this code in WhatsApp within 90 seconds.</p>
+        <button class="btn-cancel" id="btn-cancel-pair">Cancel &amp; Start Over</button>
       </div>
       <div class="stage" data-stage="pair-done">
-        <p class="hint" style="color:var(--signal);">Linked. Copy your session below.</p>
+        <p class="hint" style="color:var(--signal);">✓ Linked. Copy your session below.</p>
       </div>
     </div>
 
@@ -288,14 +204,23 @@
 </div>
 
 <script>
-const socket = io();
+// FIX: reconnection enabled with backoff so page recovers from Render sleep/network blips
+const socket = io({
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1500,
+  reconnectionDelayMax: 8000,
+});
 
+const badge = document.getElementById('conn-badge');
 const tabs = document.querySelectorAll('.tab');
 const panes = { qr: document.getElementById('pane-qr'), pairing: document.getElementById('pane-pairing') };
 let activeTab = 'qr';
+let linking = false;
 
 tabs.forEach(tab => {
   tab.addEventListener('click', () => {
+    if (linking) return; // don't switch tabs mid-session
     tabs.forEach(t => t.classList.remove('active'));
     tab.classList.add('active');
     Object.values(panes).forEach(p => p.classList.remove('active'));
@@ -311,14 +236,22 @@ function setStage(pane, stageName) {
   if (target) target.classList.add('active');
 }
 
-function showStatus(message, type) {
+function showStatus(message, type = 'info') {
   const el = document.getElementById('status-line');
   el.textContent = message;
   el.className = 'status-line ' + type;
 }
 function hideStatus() {
-  const el = document.getElementById('status-line');
-  el.className = 'status-line';
+  document.getElementById('status-line').className = 'status-line';
+}
+
+function resetToIdle() {
+  linking = false;
+  setStage(panes.qr, 'qr-idle');
+  setStage(panes.pairing, 'pair-idle');
+  document.getElementById('session-out').style.display = 'none';
+  document.getElementById('qr-attempt').textContent = '';
+  tabs.forEach(t => t.style.pointerEvents = '');
 }
 
 function showSession(sessionString) {
@@ -326,23 +259,44 @@ function showSession(sessionString) {
   document.getElementById('session-text').value = sessionString;
 }
 
+// ---------- QR ----------
 document.getElementById('btn-start-qr').addEventListener('click', () => {
+  linking = true;
+  tabs.forEach(t => t.style.pointerEvents = 'none');
   setStage(panes.qr, 'qr-loading');
   hideStatus();
   socket.emit('start-session', { method: 'qr' });
 });
 
-document.getElementById('btn-start-pairing').addEventListener('click', () => {
-  const phone = document.getElementById('phone-input').value.trim();
-  if (!phone.match(/^\+?[0-9]{8,15}$/)) {
-    showStatus('Enter a valid phone number with country code, no spaces.', 'error');
-    return;
-  }
-  setStage(panes.pairing, 'pair-loading');
+document.getElementById('btn-cancel-qr').addEventListener('click', () => {
+  socket.emit('cancel-session');
+  resetToIdle();
   hideStatus();
-  socket.emit('start-session', { method: 'pairing', phoneNumber: phone });
 });
 
+// ---------- Pairing ----------
+document.getElementById('btn-start-pairing').addEventListener('click', () => {
+  // FIX: strip all non-digits before validation so +254 712 345 678 works
+  const raw = document.getElementById('phone-input').value.trim();
+  const clean = raw.replace(/\D/g, '');
+  if (!clean || clean.length < 7 || clean.length > 15) {
+    showStatus('Enter a valid phone number with country code (digits only, e.g. 254712345678).', 'error');
+    return;
+  }
+  linking = true;
+  tabs.forEach(t => t.style.pointerEvents = 'none');
+  setStage(panes.pairing, 'pair-loading');
+  hideStatus();
+  socket.emit('start-session', { method: 'pairing', phoneNumber: clean });
+});
+
+document.getElementById('btn-cancel-pair').addEventListener('click', () => {
+  socket.emit('cancel-session');
+  resetToIdle();
+  hideStatus();
+});
+
+// ---------- Copy ----------
 document.getElementById('copy-btn').addEventListener('click', () => {
   const text = document.getElementById('session-text').value;
   navigator.clipboard.writeText(text).then(() => {
@@ -350,29 +304,58 @@ document.getElementById('copy-btn').addEventListener('click', () => {
   });
 });
 
+// ---------- Socket events ----------
+socket.on('connect', () => {
+  badge.textContent = 'connected';
+  badge.className = 'conn-badge connected';
+});
+
+socket.on('disconnect', () => {
+  badge.textContent = 'disconnected';
+  badge.className = 'conn-badge disconnected';
+  if (linking) showStatus('Connection lost — reconnecting…', 'warn');
+});
+
+socket.on('reconnect', () => {
+  badge.textContent = 'connected';
+  badge.className = 'conn-badge connected';
+  if (linking) showStatus('Reconnected. If linking stalled, cancel and try again.', 'warn');
+});
+
 socket.on('qr', (data) => {
   if (activeTab !== 'qr') return;
   document.getElementById('qr-img').src = data.qr;
   setStage(panes.qr, 'qr-show');
+  if (data.attempt > 1) {
+    document.getElementById('qr-attempt').textContent = `QR refreshed (attempt ${data.attempt})`;
+  }
 });
 
 socket.on('pairing-code', (data) => {
-  if (activeTab !== 'pairing') return;
   document.getElementById('pair-code-text').textContent = data.code;
   setStage(panes.pairing, 'pair-show');
 });
 
 socket.on('connected', (data) => {
+  linking = false;
+  tabs.forEach(t => t.style.pointerEvents = '');
   showStatus(`Connected as ${data.user?.name || data.user?.id || 'device'}.`, 'ok');
   showSession(data.sessionString);
   if (activeTab === 'qr') setStage(panes.qr, 'qr-done');
   else setStage(panes.pairing, 'pair-done');
 });
 
+socket.on('status', (data) => {
+  showStatus(data.message, 'warn');
+});
+
 socket.on('error', (data) => {
   showStatus(data.message || 'Something went wrong.', 'error');
-  if (activeTab === 'qr') setStage(panes.qr, 'qr-idle');
-  else setStage(panes.pairing, 'pair-idle');
+  resetToIdle();
+});
+
+socket.on('cancelled', () => {
+  resetToIdle();
 });
 </script>
 
