@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MEGA MIND — Link Device</title>
+<title>{{BOT_TITLE}} — Link Device</title>
+<link rel="icon" type="image/png" href="/assets/profile.png">
 <script src="/socket.io/socket.io.js"></script>
 <style>
   :root {
@@ -49,6 +50,13 @@
     pointer-events: none;
   }
   .head { padding: 22px 24px 16px; border-bottom: 1px solid var(--line); }
+  .head-row { display: flex; align-items: center; gap: 14px; }
+  .avatar {
+    width: 54px; height: 54px; border-radius: 50%; flex-shrink: 0;
+    object-fit: cover; border: 1px solid var(--signal-dim);
+    box-shadow: 0 0 0 4px rgba(52,245,163,0.06), 0 0 18px rgba(52,245,163,0.25);
+  }
+  .head-text { min-width: 0; }
   .head .tag { font-size: 11px; letter-spacing: 3px; color: var(--signal); text-transform: uppercase; }
   .head h1 { font-size: 20px; letter-spacing: 1px; margin-top: 6px; font-weight: 600; }
   .head p { color: var(--text-dim); font-size: 13px; margin-top: 6px; line-height: 1.5; }
@@ -134,9 +142,15 @@
 
 <div class="panel">
   <div class="head">
-    <div class="tag">MEGA MIND // SESSION SERVER</div>
-    <h1>Link your WhatsApp</h1>
+    <div class="head-row">
+      <img src="/assets/profile.png" alt="{{BOT_TITLE}}" class="avatar">
+      <div class="head-text">
+        <div class="tag">{{BOT_TITLE}}</div>
+        <h1>{{BOT_TAGLINE}}</h1>
+      </div>
+    </div>
     <p>Generates a session your bot uses to log in. Copy the SESSION_ID once linked and paste it into your bot's env vars.</p>
+    <p style="margin-top:4px;">Bot owner: <strong style="color:var(--signal);">{{OWNER_NAME}}</strong></p>
     <span class="conn-badge" id="conn-badge">connecting…</span>
   </div>
 
@@ -200,7 +214,7 @@
     <div class="status-line" id="status-line"></div>
   </div>
 
-  <div class="foot">Keep your SESSION_ID private — it grants full access to the linked WhatsApp account.</div>
+  <div class="foot">⚠️ Keep your SESSION_ID private — it grants full access to the linked WhatsApp account.<br>{{BOT_TITLE}} • {{BOT_TAGLINE}}</div>
 </div>
 
 <script>
