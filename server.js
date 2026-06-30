@@ -27,6 +27,12 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3000;
+// Branding shown on the link page — defaults match the bot's own set.js
+// (BOT_TITLE / BOT_TAGLINE) so this page and the bot look like the same
+// product. Override with env vars if you rebrand the bot later.
+const BOT_TITLE = process.env.BOT_TITLE || 'PROFESSOR TECH';
+const BOT_TAGLINE = process.env.BOT_TAGLINE || 'MEGA-MIND BOT';
+const OWNER_NAME = process.env.OWNER_NAME || 'Professor';
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 const RECORDS_DIR = path.join(__dirname, 'records');
 const SESSION_TTL_MS = 60 * 60 * 1000;
@@ -38,6 +44,24 @@ fs.ensureDirSync(RECORDS_DIR);
 const liveSockets = new Map();
 
 app.use(express.json());
+
+// Serve the link page with branding placeholders filled in, so the page
+// shows the bot's actual identity (e.g. "PROFESSOR TECH") instead of a
+// generic name. Static middleware below still serves /assets/* normally.
+app.get('/', async (_req, res) => {
+    try {
+        let html = await fs.readFile(path.join(__dirname, 'public', 'index.html'), 'utf8');
+        html = html
+            .replace(/\{\{BOT_TITLE\}\}/g, BOT_TITLE)
+            .replace(/\{\{BOT_TAGLINE\}\}/g, BOT_TAGLINE)
+            .replace(/\{\{OWNER_NAME\}\}/g, OWNER_NAME);
+        res.set('Cache-Control', 'no-store'); // never serve a stale cached page after a redeploy
+        res.send(html);
+    } catch (err) {
+        res.status(500).send('Failed to load page: ' + err.message);
+    }
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- helpers ----------
