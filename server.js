@@ -186,7 +186,11 @@ io.on('connection', (socket) => {
                 auth: state,
                 logger: P({ level: 'silent' }),
                 printQRInTerminal: false,
-                browser: ['MEGA MIND', 'Chrome', '3.0.0'],
+                // Must match the browser fingerprint the bot itself uses to
+                // reconnect (MEGA-MIND-main/index.js). A mismatch here is
+                // what causes WhatsApp to log the session back out shortly
+                // after linking — it looks like a different device.
+                browser: ['MEGA MIND', 'Chrome', '120.0.0'],
                 syncFullHistory: false,
                 connectTimeoutMs: 60000,
                 defaultQueryTimeoutMs: 60000,
@@ -275,6 +279,19 @@ io.on('connection', (socket) => {
                             // Non-fatal — user still has it on the web page
                             console.error('[session] self-message failed:', err.message);
                         }
+
+                        // IMPORTANT: close this socket once the session has been
+                        // captured and handed off. Leaving it alive (it used to
+                        // sit in liveSockets until the 1hr cleanup) meant TWO
+                        // active WhatsApp connections shared the same session —
+                        // this server's, and the bot's own once it reconnects
+                        // with the SESSION_ID. WhatsApp treats that as a device
+                        // conflict and force-logs-out one of them, which is what
+                        // was causing the repeated logouts after QR linking.
+                        setTimeout(async () => {
+                            await killSocket(sessionId);
+                            console.log(`[session ${sessionId}] generator socket closed — handed off to bot`);
+                        }, 4000);
                     } catch (err) {
                         console.error('[session] finalize error:', err.message);
                         socket.emit('error', { message: 'Linked but failed to save session: ' + err.message });
