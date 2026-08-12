@@ -224,6 +224,44 @@ io.on('connection', (socket) => {
             liveSockets.set(sessionId, sock);
             sock.ev.on('creds.update', saveCreds);
 
+            // ── Pairing method ──
+            // Per Baileys' own docs, requestPairingCode() should be called
+            // right after the socket is created (guarded by
+            // `!sock.authState.creds.registered`), NOT gated behind waiting
+            // for a 'qr' connection.update event. Waiting for 'qr' was
+            // fragile even before, and got worse on Baileys 7.x's new
+            // connection internals — the qr event can now arrive late, in a
+            // different order, or not fire in a way this code expects,
+            // which silently prevented requestPairingCode() from ever
+            // running. requestPairingCode() itself sends its request over
+            // the socket directly, so it doesn't need the qr event at all.
+            if (method === 'pairing' && !pairingRequested) {
+                pairingRequested = true;
+                (async () => {
+                    try {
+                        const clean = (phoneNumber || '').replace(/\D/g, '');
+                        if (!clean || clean.length < 7) {
+                            socket.emit('error', { message: 'Invalid phone number. Use country code + digits only, e.g. 254712345678' });
+                            return;
+                        }
+                        // Small delay so the socket finishes its initial
+                        // handshake before we request a code.
+                        await new Promise(r => setTimeout(r, 3000));
+                        if (cancelled || sock.authState.creds.registered) return;
+                        const code = await sock.requestPairingCode(clean);
+                        // Format as XXXX-XXXX if 8 chars
+                        const formatted = code.length === 8
+                            ? code.slice(0, 4) + '-' + code.slice(4)
+                            : code;
+                        socket.emit('pairing-code', { code: formatted, sessionId });
+                    } catch (err) {
+                        pairingRequested = false; // allow retry on reconnect
+                        console.error('[pairing] requestPairingCode failed:', err.message);
+                        socket.emit('error', { message: 'Could not get pairing code: ' + err.message });
+                    }
+                })();
+            }
+
             sock.ev.on('connection.update', async (update) => {
                 if (cancelled) return;
                 const { connection, lastDisconnect, qr } = update;
@@ -239,32 +277,6 @@ io.on('connection', (socket) => {
                     }
                 }
 
-                // ── Pairing method ──
-                // Request code on the first QR event — this confirms the WA connection
-                // is live and ready to accept requestPairingCode()
-                if (method === 'pairing' && qr && !pairingRequested) {
-                    pairingRequested = true;
-                    try {
-                        const clean = (phoneNumber || '').replace(/\D/g, '');
-                        if (!clean || clean.length < 7) {
-                            socket.emit('error', { message: 'Invalid phone number. Use country code + digits only, e.g. 254712345678' });
-                            return;
-                        }
-                        // 3s delay — Baileys must finish key exchange before pairing code request
-                        await new Promise(r => setTimeout(r, 3000));
-                        if (cancelled) return;
-                        const code = await sock.requestPairingCode(clean);
-                        // Format as XXXX-XXXX if 8 chars
-                        const formatted = code.length === 8
-                            ? code.slice(0, 4) + '-' + code.slice(4)
-                            : code;
-                        socket.emit('pairing-code', { code: formatted, sessionId });
-                    } catch (err) {
-                        pairingRequested = false; // allow retry on next QR event
-                        console.error('[pairing] requestPairingCode failed:', err.message);
-                        socket.emit('error', { message: 'Could not get pairing code: ' + err.message });
-                    }
-                }
 
                 // ── Connected ──
                 if (connection === 'open') {
