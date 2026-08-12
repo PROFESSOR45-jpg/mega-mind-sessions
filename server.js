@@ -10,7 +10,8 @@ const {
     makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 const P = require('pino');
 const QRCode = require('qrcode');
@@ -302,9 +303,16 @@ io.on('connection', (socket) => {
                         });
                         console.log(`[session ${sessionId}] linked as ${record.user?.id}`);
 
-                        // Send SESSION_ID to self-chat (saved messages) on the linked number
+                        // Send SESSION_ID to self-chat (saved messages) on the linked number.
+                        // IMPORTANT: sock.user.id includes a ":<deviceId>" suffix
+                        // (e.g. "1234567890:12@s.whatsapp.net"). sendMessage()
+                        // rejects/silently fails on a JID in that raw form — it
+                        // must be normalized first, or this send fails every
+                        // time with no visible error (only a console log on the
+                        // server, which nobody watching the web page ever sees).
+                        // This was why the session message never arrived.
                         try {
-                            const selfJid = sock.user.id;
+                            const selfJid = jidNormalizedUser(sock.user.id);
                             const msg = `*🤖 MEGA MIND — Session Ready*\n\n` +
                                 `Copy the SESSION_ID below and set it as \`SESSION_ID\` in your bot's environment variables.\n\n` +
                                 `${portableSessionId}\n\n` +
@@ -312,8 +320,11 @@ io.on('connection', (socket) => {
                             await sock.sendMessage(selfJid, { text: msg });
                             console.log(`[session ${sessionId}] SESSION_ID sent to self-chat`);
                         } catch (err) {
-                            // Non-fatal — user still has it on the web page
+                            // Still non-fatal — the page has the session ID
+                            // regardless — but now also surfaced to the
+                            // frontend so it isn't silently swallowed.
                             console.error('[session] self-message failed:', err.message);
+                            socket.emit('status', { message: `Note: could not DM the session to WhatsApp (${err.message}). Copy it from this page instead.` });
                         }
 
                         // IMPORTANT: close this socket once the session has been
