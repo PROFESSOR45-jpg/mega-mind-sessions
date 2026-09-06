@@ -189,6 +189,33 @@ io.on('connection', (socket) => {
         const MAX_RETRIES = 3;
         let linked = false;
 
+        // A known, currently-unresolved WhatsApp/Baileys protocol issue
+        // (WhiskeySockets/Baileys #2488, #2737) means the phone sometimes
+        // never receives the final "linked" confirmation after a pairing
+        // code is entered correctly — the socket just idles. Community
+        // reports consistently show a *second* attempt succeeding far more
+        // often than the first, so instead of leaving the user stuck on a
+        // code that will never confirm, we auto-regenerate once after a
+        // short stall window.
+        let pairAttempt = 1;
+        const MAX_PAIR_ATTEMPTS = 2;
+        const PAIR_STALL_MS = 40 * 1000;
+        let pairStallTimer = null;
+
+        function clearPairStallTimer() {
+            if (pairStallTimer) {
+                clearTimeout(pairStallTimer);
+                pairStallTimer = null;
+            }
+        }
+
+        function logDiag(event, data) {
+            // Lightweight diagnostic trail (no creds/keys) so a stuck link
+            // attempt can actually be debugged after the fact instead of
+            // failing silently.
+            console.log(`[diag ${sessionId}] ${event}`, data || '');
+        }
+
         const linkTimer = setTimeout(async () => {
             if (linked || cancelled) return;
             const record = await readRecord(sessionId);
@@ -201,6 +228,7 @@ io.on('connection', (socket) => {
 
         async function spawnSocket() {
             if (cancelled) return;
+            clearPairStallTimer();
 
             // Always re-read state from disk (creds may have been partially saved)
             const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
@@ -254,7 +282,35 @@ io.on('connection', (socket) => {
                         const formatted = code.length === 8
                             ? code.slice(0, 4) + '-' + code.slice(4)
                             : code;
-                        socket.emit('pairing-code', { code: formatted, sessionId });
+                        socket.emit('pairing-code', { code: formatted, sessionId, attempt: pairAttempt, maxAttempts: MAX_PAIR_ATTEMPTS });
+                        logDiag('pairing-code issued', { attempt: pairAttempt });
+
+                        clearPairStallTimer();
+                        pairStallTimer = setTimeout(async () => {
+                            if (linked || cancelled) return;
+                            logDiag('pairing stalled — no confirmation from WhatsApp', { attempt: pairAttempt });
+
+                            if (pairAttempt >= MAX_PAIR_ATTEMPTS) {
+                                // Don't loop forever — hand control back with an
+                                // honest explanation instead of silently retrying.
+                                socket.emit('error', {
+                                    message: `WhatsApp isn't confirming the link after ${MAX_PAIR_ATTEMPTS} attempts. This matches a known upstream WhatsApp/Baileys issue, not a problem with your phone number — try again in a few minutes, or use the QR tab instead.`
+                                });
+                                await killSocket(sessionId);
+                                await deleteRecord(sessionId);
+                                return;
+                            }
+
+                            pairAttempt++;
+                            pairingRequested = false;
+                            socket.emit('status', {
+                                message: `No confirmation yet — this is a known intermittent WhatsApp linking issue. Generating a fresh code (attempt ${pairAttempt}/${MAX_PAIR_ATTEMPTS})…`
+                            });
+                            await killSocket(sessionId);
+                            spawnSocket().catch(err => {
+                                socket.emit('error', { message: 'Retry failed: ' + err.message });
+                            });
+                        }, PAIR_STALL_MS);
                     } catch (err) {
                         pairingRequested = false; // allow retry on reconnect
                         console.error('[pairing] requestPairingCode failed:', err.message);
@@ -266,6 +322,14 @@ io.on('connection', (socket) => {
             sock.ev.on('connection.update', async (update) => {
                 if (cancelled) return;
                 const { connection, lastDisconnect, qr } = update;
+
+                if (connection || lastDisconnect) {
+                    logDiag('connection.update', {
+                        connection,
+                        hasQr: !!qr,
+                        closeCode: lastDisconnect?.error?.output?.statusCode || null
+                    });
+                }
 
                 // ── QR method ──
                 if (qr && method === 'qr') {
@@ -283,6 +347,7 @@ io.on('connection', (socket) => {
                 if (connection === 'open') {
                     linked = true;
                     clearTimeout(linkTimer);
+                    clearPairStallTimer();
 
                     try {
                         // Wait for creds.json to be fully written
@@ -352,6 +417,7 @@ io.on('connection', (socket) => {
 
                     if (loggedOut) {
                         clearTimeout(linkTimer);
+                        clearPairStallTimer();
                         socket.emit('error', { message: 'WhatsApp logged out the session. Please try again.' });
                         await killSocket(sessionId);
                         await deleteRecord(sessionId);
