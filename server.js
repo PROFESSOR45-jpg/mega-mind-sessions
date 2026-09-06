@@ -119,32 +119,26 @@ async function buildPortableSession(sessionPath) {
     // creds.json is written non-atomically by Baileys, so right after linking
     // it can exist on disk while still mid-write — reading it too early gives
     // a truncated file and "Unexpected end of JSON input". Retry the parse
-    // itself (not just existence) until it succeeds.
+    // itself (not just existence) until it succeeds, and require sock.user's
+    // "me" key to be present so we know the write actually finished, not just
+    // that some earlier partial write left a file behind.
     //
-    // IMPORTANT: "me" being present is NOT enough on its own. Baileys fires
-    // connection.update's "open" event before it flips creds.registered to
-    // true and persists that. A real captured session confirmed this:
-    // "me" was already populated but "registered" was still false — and a
-    // session exported at that instant makes the bot's reconnect look like
-    // an already-linked device claiming to be unregistered, which WhatsApp
-    // kills almost immediately. So wait for BOTH "me" and "registered: true"
-    // before treating the session as done.
+    // NOTE: creds.registered is commonly still false at this point — that's
+    // normal for a freshly linked Baileys session (it doesn't flip until
+    // later reconnects/sync), not a sign the session is broken. An earlier
+    // version of this function required registered:true before exporting,
+    // which turned out to block every session indefinitely. Don't add that
+    // check back without solid evidence it's actually the cause of a problem.
     const credsPath = path.join(sessionPath, 'creds.json');
-    const maxAttempts = 30; // ~15s total — registered can lag a bit behind "me"
+    const maxAttempts = 20; // ~10s total
     let lastErr = null;
 
     for (let i = 0; i < maxAttempts; i++) {
         if (await fs.pathExists(credsPath)) {
             try {
                 const creds = await fs.readJson(credsPath);
-                if (creds && creds.me && creds.registered === true) {
-                    return 'MEGA~' + Buffer.from(JSON.stringify(creds)).toString('base64');
-                }
-                lastErr = new Error(
-                    creds && creds.me
-                        ? 'creds.json present but not yet registered (registered: ' + (creds && creds.registered) + ')'
-                        : 'creds.json present but incomplete (missing "me")'
-                );
+                if (creds && creds.me) return 'MEGA~' + Buffer.from(JSON.stringify(creds)).toString('base64');
+                lastErr = new Error('creds.json present but incomplete (missing "me")');
             } catch (err) {
                 lastErr = err; // mid-write — file exists but isn't valid JSON yet
             }
