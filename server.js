@@ -11,7 +11,9 @@ const {
     useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion,
-    jidNormalizedUser
+    jidNormalizedUser,
+    generateWAMessageFromContent,
+    proto
 } = require('@whiskeysockets/baileys');
 const P = require('pino');
 const QRCode = require('qrcode');
@@ -124,6 +126,47 @@ async function buildPortableSession(sessionPath) {
     }
     const creds = await fs.readJson(credsPath);
     return 'MEGA~' + Buffer.from(JSON.stringify(creds)).toString('base64');
+}
+
+// Same pattern used by the bot itself (MEGA-MIND-main/index.js) — sends the
+// session as a tappable "copy" button (the same native-flow mechanism
+// WhatsApp uses for OTP messages). NOT an officially supported message type
+// for personal accounts, so the full string is always also included as
+// plain monospace text in the same message as a guaranteed fallback, and if
+// the button send throws outright, this falls back to a plain message.
+async function sendSessionCopyCard(sock, jid, sessionString) {
+    const preview = sessionString.slice(0, 18) + '…' + sessionString.slice(-6);
+    const bodyText =
+        `*🤖 MEGA MIND — Session Ready*\n\n` +
+        `Tap "Copy session" below, or copy it manually:\n\n` +
+        '```' + sessionString + '```\n\n' +
+        `⚠️ Keep this private — it grants full access to this WhatsApp account.`;
+
+    try {
+        const content = {
+            interactiveMessage: proto.Message.InteractiveMessage.create({
+                body: proto.Message.InteractiveMessage.Body.create({ text: bodyText }),
+                footer: proto.Message.InteractiveMessage.Footer.create({ text: `Session: ${preview}` }),
+                nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+                    buttons: [
+                        proto.Message.InteractiveMessage.NativeFlowMessage.NativeFlowButton.create({
+                            name: 'cta_copy',
+                            buttonParamsJson: JSON.stringify({
+                                display_text: 'Copy session',
+                                id: 'copy_session_id',
+                                copy_code: sessionString
+                            })
+                        })
+                    ]
+                })
+            })
+        };
+        const msg = generateWAMessageFromContent(jid, content, { userJid: sock.user.id });
+        await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
+    } catch (err) {
+        console.log(`[session] interactive copy button failed (${err.message}) — sending as plain text instead.`);
+        await sock.sendMessage(jid, { text: bodyText });
+    }
 }
 
 // ---------- REST API ----------
@@ -316,18 +359,49 @@ io.on('connection', (socket) => {
                     // this was happening silently before. WhatsApp sometimes
                     // flips registered=true a moment after 'open' fires, so
                     // poll briefly instead of failing instantly.
+                    // Live status message that edits itself once per second
+                    // during the wait above — real elapsed time, tied to the
+                    // actual registration poll, not a fake animation. Sent to
+                    // self-chat if we already know the account's JID this early.
+                    let statusJid = null;
+                    let statusMsgKey = null;
+                    if (sock.user?.id) {
+                        try {
+                            statusJid = jidNormalizedUser(sock.user.id);
+                            const sent = await sock.sendMessage(statusJid, { text: '⏳ Confirming device registration with WhatsApp… 0s' });
+                            statusMsgKey = sent.key;
+                        } catch (err) {
+                            logDiag('could not send waiting-status message', { err: err.message });
+                        }
+                    }
+
                     if (!sock.authState.creds.registered) {
                         logDiag('open fired but not yet registered — waiting briefly', {});
                         let waited = 0;
+                        let lastEditedSecond = 0;
                         const POLL_MS = 400;
                         const MAX_WAIT_MS = 8000;
                         while (!sock.authState.creds.registered && waited < MAX_WAIT_MS && !cancelled) {
                             await new Promise(r => setTimeout(r, POLL_MS));
                             waited += POLL_MS;
+                            const currentSecond = Math.floor(waited / 1000);
+                            if (statusMsgKey && currentSecond > lastEditedSecond) {
+                                lastEditedSecond = currentSecond;
+                                sock.sendMessage(statusJid, {
+                                    text: `⏳ Confirming device registration with WhatsApp… ${currentSecond}s`,
+                                    edit: statusMsgKey
+                                }).catch(() => {});
+                            }
                         }
                         if (cancelled) return;
                         if (!sock.authState.creds.registered) {
                             logDiag('registration never completed after open', { waitedMs: waited });
+                            if (statusMsgKey) {
+                                sock.sendMessage(statusJid, {
+                                    text: '❌ Registration never confirmed — please try linking again.',
+                                    edit: statusMsgKey
+                                }).catch(() => {});
+                            }
                             socket.emit('error', {
                                 message: 'WhatsApp connected but never finished confirming the device link — this matches a known intermittent WhatsApp issue, not a problem with your phone number. Please try linking again.'
                             });
@@ -336,6 +410,14 @@ io.on('connection', (socket) => {
                             return;
                         }
                         logDiag('registration completed after wait', { waitedMs: waited });
+                        if (statusMsgKey) {
+                            await sock.sendMessage(statusJid, {
+                                text: `✅ Device registered in ${Math.round(waited / 1000)}s!`,
+                                edit: statusMsgKey
+                            }).catch(() => {});
+                        }
+                    } else if (statusMsgKey) {
+                        await sock.sendMessage(statusJid, { text: '✅ Device already registered!', edit: statusMsgKey }).catch(() => {});
                     }
 
                     linked = true;
@@ -359,21 +441,16 @@ io.on('connection', (socket) => {
                         });
                         console.log(`[session ${sessionId}] linked as ${record.user?.id}`);
 
-                        // Send SESSION_ID to self-chat (saved messages) on the linked number.
-                        // IMPORTANT: sock.user.id includes a ":<deviceId>" suffix
-                        // (e.g. "1234567890:12@s.whatsapp.net"). sendMessage()
-                        // rejects/silently fails on a JID in that raw form — it
-                        // must be normalized first, or this send fails every
-                        // time with no visible error (only a console log on the
-                        // server, which nobody watching the web page ever sees).
-                        // This was why the session message never arrived.
+                        // Send SESSION_ID to self-chat as a tappable "copy"
+                        // button (with a guaranteed plain-text fallback baked
+                        // into the same message — see sendSessionCopyCard).
+                        // IMPORTANT: sock.user.id includes a ":<deviceId>"
+                        // suffix (e.g. "1234567890:12@s.whatsapp.net"); it must
+                        // be normalized via jidNormalizedUser or sendMessage
+                        // silently fails.
                         try {
-                            const selfJid = jidNormalizedUser(sock.user.id);
-                            const msg = `*🤖 MEGA MIND — Session Ready*\n\n` +
-                                `Copy the SESSION_ID below and set it as \`SESSION_ID\` in your bot's environment variables.\n\n` +
-                                `${portableSessionId}\n\n` +
-                                `⚠️ Keep this private — it grants full access to this WhatsApp account.`;
-                            await sock.sendMessage(selfJid, { text: msg });
+                            const selfJid = statusJid || jidNormalizedUser(sock.user.id);
+                            await sendSessionCopyCard(sock, selfJid, portableSessionId);
                             console.log(`[session ${sessionId}] SESSION_ID sent to self-chat`);
                         } catch (err) {
                             // Still non-fatal — the page has the session ID
