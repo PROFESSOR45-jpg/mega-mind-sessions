@@ -279,8 +279,8 @@
         </div>
         <div class="stage" data-stage="pair-show" style="text-align:center;">
           <div class="pair-code" id="pair-code-text">— — — —</div>
-          <p class="hint">Enter this code in WhatsApp within 90 seconds.</p>
-          <p class="qr-hint" id="pair-attempt"></p>
+          <p class="hint">Open WhatsApp → Settings → Linked Devices → Link a Device → <em>Link with phone number instead</em>, then type this code. No notification needed — this method doesn't wait for one.</p>
+          <button class="btn" id="btn-new-code" style="margin-top:14px;">Get a new code</button>
           <button class="btn-cancel" id="btn-cancel-pair">Cancel &amp; start over</button>
         </div>
         <div class="stage" data-stage="pair-done">
@@ -424,6 +424,7 @@ const tabs = document.querySelectorAll('.tab');
 const panes = { qr: document.getElementById('pane-qr'), pairing: document.getElementById('pane-pairing') };
 let activeTab = 'qr';
 let linking = false;
+let lastPhoneNumber = '';
 
 tabs.forEach(tab => {
   tab.addEventListener('click', () => {
@@ -490,11 +491,20 @@ document.getElementById('btn-start-pairing').addEventListener('click', () => {
     showStatus('Enter a valid phone number with country code (digits only, e.g. 254712345678).', 'error');
     return;
   }
+  lastPhoneNumber = clean;
   linking = true;
   tabs.forEach(t => t.style.pointerEvents = 'none');
   setStage(panes.pairing, 'pair-loading');
   hideStatus();
   socket.emit('start-session', { method: 'pairing', phoneNumber: clean });
+});
+
+document.getElementById('btn-new-code').addEventListener('click', () => {
+  // Manual regeneration only — no auto-retry racing against someone
+  // still mid-way through typing the previous code.
+  setStage(panes.pairing, 'pair-loading');
+  hideStatus();
+  socket.emit('start-session', { method: 'pairing', phoneNumber: lastPhoneNumber });
 });
 
 document.getElementById('btn-cancel-pair').addEventListener('click', () => {
@@ -540,8 +550,6 @@ socket.on('qr', (data) => {
 
 socket.on('pairing-code', (data) => {
   document.getElementById('pair-code-text').textContent = data.code;
-  const attemptEl = document.getElementById('pair-attempt');
-  attemptEl.textContent = (data.maxAttempts > 1) ? `Attempt ${data.attempt} of ${data.maxAttempts}` : '';
   setStage(panes.pairing, 'pair-show');
 });
 
