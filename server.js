@@ -282,6 +282,40 @@ io.on('connection', (socket) => {
             liveSockets.set(sessionId, sock);
             sock.ev.on('creds.update', saveCreds);
 
+            // KNOWN UPSTREAM BUG (WhiskeySockets/Baileys #2488 and #2737 —
+            // confirmed still unresolved as of Sept 2026, and independently
+            // reproduced in whatsmeow, a completely separate implementation
+            // — so this is WhatsApp-server-side, not a Baileys-specific
+            // bug). Partway through registration, WhatsApp sends a raw
+            // <notification type="companion_reg_refresh"> meaning the
+            // in-progress registration material has been retired and must
+            // be redone with a fresh code/QR. Baileys currently just acks
+            // and discards this notification instead of acting on it, so
+            // pair-success never arrives and the attempt silently stalls.
+            // We can't patch Baileys' internals from here, but sock.ws is a
+            // real EventEmitter exposed on the socket — so we listen for the
+            // same raw event ourselves and react immediately: restart with a
+            // completely fresh code, the practical equivalent of the
+            // rotation a proper fix would do, instead of waiting out the
+            // full generic timeout for something already unrecoverable.
+            let regRefreshHandled = false;
+            sock.ws.on('CB:notification', (node) => {
+                if (regRefreshHandled || cancelled || linked) return;
+                if (node?.attrs?.type !== 'companion_reg_refresh') return;
+                regRefreshHandled = true;
+                logDiag('companion_reg_refresh received — known upstream WhatsApp bug, restarting with a fresh code', {});
+                socket.emit('status', {
+                    message: 'WhatsApp retired this registration mid-way (a known current WhatsApp-side issue) — generating a fresh code automatically…'
+                });
+                (async () => {
+                    pairingRequested = false;
+                    await killSocket(sessionId);
+                    spawnSocket().catch(err => {
+                        socket.emit('error', { message: 'Auto-restart failed: ' + err.message });
+                    });
+                })();
+            });
+
             // ── Pairing method ──
             // Per Baileys' own docs, requestPairingCode() should be called
             // right after the socket is created (guarded by
