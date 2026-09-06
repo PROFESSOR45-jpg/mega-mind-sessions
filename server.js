@@ -116,14 +116,30 @@ async function killSocket(sessionId) {
 }
 
 async function buildPortableSession(sessionPath) {
-    // Wait up to 5s for creds.json to appear (creds.update can lag behind connection open)
+    // creds.json is written non-atomically by Baileys, so right after linking
+    // it can exist on disk while still mid-write — reading it too early gives
+    // a truncated file and "Unexpected end of JSON input". Retry the parse
+    // itself (not just existence) until it succeeds, and require sock.user's
+    // "me" key to be present so we know the write actually finished, not just
+    // that some earlier partial write left a file behind.
     const credsPath = path.join(sessionPath, 'creds.json');
-    for (let i = 0; i < 10; i++) {
-        if (await fs.pathExists(credsPath)) break;
+    const maxAttempts = 20; // ~10s total
+    let lastErr = null;
+
+    for (let i = 0; i < maxAttempts; i++) {
+        if (await fs.pathExists(credsPath)) {
+            try {
+                const creds = await fs.readJson(credsPath);
+                if (creds && creds.me) return 'MEGA~' + Buffer.from(JSON.stringify(creds)).toString('base64');
+                lastErr = new Error('creds.json present but incomplete (missing "me")');
+            } catch (err) {
+                lastErr = err; // mid-write — file exists but isn't valid JSON yet
+            }
+        }
         await new Promise(r => setTimeout(r, 500));
     }
-    const creds = await fs.readJson(credsPath);
-    return 'MEGA~' + Buffer.from(JSON.stringify(creds)).toString('base64');
+
+    throw new Error(`creds.json was not ready in time${lastErr ? ': ' + lastErr.message : ' (file never appeared)'}`);
 }
 
 // ---------- REST API ----------
