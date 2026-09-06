@@ -12,7 +12,7 @@
   "dependencies": {
     "express": "^4.19.2",
     "socket.io": "^4.7.5",
-    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "@whiskeysockets/baileys": "github:WhiskeySockets/Baileys#master",
     "qrcode": "^1.5.3",
     "pino": "^9.6.0",
     "fs-extra": "^11.2.0"
