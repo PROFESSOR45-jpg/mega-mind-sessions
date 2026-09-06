@@ -372,8 +372,8 @@ io.on('connection', (socket) => {
 
                     if (!sock.authState.creds.registered) {
                         logDiag('open fired but not yet registered — waiting briefly', {});
-                        const POLL_MS = 400;
-                        const MAX_WAIT_MS = 8000;
+                        const POLL_MS = 500;
+                        const MAX_WAIT_MS = 25 * 1000; // was 8s — too short; WhatsApp's confirmation can genuinely take longer than that during the known intermittent issue
                         while (!sock.authState.creds.registered && waitedMs < MAX_WAIT_MS && !cancelled) {
                             await new Promise(r => setTimeout(r, POLL_MS));
                             waitedMs += POLL_MS;
@@ -384,6 +384,7 @@ io.on('connection', (socket) => {
                             socket.emit('error', {
                                 message: 'WhatsApp connected but never finished confirming the device link — this matches a known intermittent WhatsApp issue, not a problem with your phone number. Please try linking again.'
                             });
+                            cancelled = true; // done — the close event killSocket() triggers next must not retry over this
                             await killSocket(sessionId);
                             await deleteRecord(sessionId);
                             return;
@@ -472,12 +473,13 @@ io.on('connection', (socket) => {
                     if (loggedOut) {
                         clearTimeout(linkTimer);
                         socket.emit('error', { message: 'WhatsApp logged out the session. Please try again.' });
+                        cancelled = true;
                         await killSocket(sessionId);
                         await deleteRecord(sessionId);
                         return;
                     }
 
-                    if (linked) return; // transient close after success — ignore
+                    if (linked || cancelled) return; // transient close after success/deliberate stop — ignore
 
                     // Connection dropped before linking — retry
                     retryCount++;
@@ -486,6 +488,7 @@ io.on('connection', (socket) => {
                     if (retryCount > MAX_RETRIES) {
                         clearTimeout(linkTimer);
                         socket.emit('error', { message: `Failed to connect after ${MAX_RETRIES} attempts. Please try again.` });
+                        cancelled = true;
                         await killSocket(sessionId);
                         await deleteRecord(sessionId);
                         return;
