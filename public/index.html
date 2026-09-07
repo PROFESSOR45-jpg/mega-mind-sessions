@@ -426,6 +426,13 @@ const panes = { qr: document.getElementById('pane-qr'), pairing: document.getEle
 let activeTab = 'qr';
 let linking = false;
 let lastPhoneNumber = '';
+// True once the page has been handed a SESSION_ID. Guards against a late
+// error/cancel wiping the box that holds the user's only copy.
+let gotSession = false;
+// True if the socket dropped since the last successful connect. A reconnect
+// creates a brand-new server-side handler that knows nothing about the
+// attempt that was in flight, so that attempt is orphaned.
+let hadDisconnection = false;
 
 tabs.forEach(tab => {
   tab.addEventListener('click', () => {
@@ -458,18 +465,29 @@ function resetToIdle() {
   linking = false;
   setStage(panes.qr, 'qr-idle');
   setStage(panes.pairing, 'pair-idle');
-  document.getElementById('session-out').style.display = 'none';
+  // Never hide a session that was already delivered. The server deliberately
+  // closes its generator socket ~4s after handing one over, and a late error
+  // from that teardown used to wipe the box holding the user's only copy.
+  if (!gotSession) {
+    document.getElementById('session-out').style.display = 'none';
+  }
   document.getElementById('qr-attempt').textContent = '';
   tabs.forEach(t => t.style.pointerEvents = '');
 }
 
 function showSession(sessionString) {
-  document.getElementById('session-out').style.display = 'block';
-  document.getElementById('session-text').value = sessionString;
+  gotSession = true;
+  const box = document.getElementById('session-out');
+  box.style.display = 'block';
+  document.getElementById('session-text').value = sessionString || '';
+  // Scroll it into view — on a phone the box can be below the fold, which
+  // reads as "linked but no session id appeared".
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 // ---------- QR ----------
 document.getElementById('btn-start-qr').addEventListener('click', () => {
+  gotSession = false;
   linking = true;
   tabs.forEach(t => t.style.pointerEvents = 'none');
   setStage(panes.qr, 'qr-loading');
@@ -508,6 +526,7 @@ document.getElementById('btn-start-pairing').addEventListener('click', () => {
     return;
   }
   lastPhoneNumber = clean;
+  gotSession = false;
   linking = true;
   tabs.forEach(t => t.style.pointerEvents = 'none');
   setStage(panes.pairing, 'pair-loading');
@@ -515,9 +534,23 @@ document.getElementById('btn-start-pairing').addEventListener('click', () => {
   socket.emit('start-session', { method: 'pairing', phoneNumber: clean });
 });
 
+// Enter in the phone field submits. Without this the form is not a real form,
+// so pressing Enter did nothing at all and read as a dead button.
+document.getElementById('phone-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    document.getElementById('btn-start-pairing').click();
+  }
+});
+
 document.getElementById('btn-new-code').addEventListener('click', () => {
   // Manual regeneration only — no auto-retry racing against someone
   // still mid-way through typing the previous code.
+  if (!lastPhoneNumber) {
+    showStatus('Enter your phone number first.', 'error');
+    setStage(panes.pairing, 'pair-idle');
+    return;
+  }
   setStage(panes.pairing, 'pair-loading');
   hideStatus();
   socket.emit('start-session', { method: 'pairing', phoneNumber: lastPhoneNumber });
@@ -530,29 +563,69 @@ document.getElementById('btn-cancel-pair').addEventListener('click', () => {
 });
 
 // ---------- Copy ----------
-document.getElementById('copy-btn').addEventListener('click', () => {
-  const text = document.getElementById('session-text').value;
-  navigator.clipboard.writeText(text).then(() => {
+document.getElementById('copy-btn').addEventListener('click', async () => {
+  const field = document.getElementById('session-text');
+  const text = field.value;
+  if (!text) {
+    showStatus('There is no SESSION_ID to copy yet.', 'error');
+    return;
+  }
+  try {
+    // navigator.clipboard only exists on secure origins (HTTPS or localhost).
+    // On a plain-HTTP deployment it is undefined, so this threw a TypeError
+    // that nothing caught and the button simply did nothing.
+    await navigator.clipboard.writeText(text);
     showStatus('SESSION_ID copied to clipboard.', 'ok');
-  });
+  } catch (err) {
+    // Fallback for insecure origins and older mobile browsers.
+    try {
+      field.focus();
+      field.select();
+      field.setSelectionRange(0, text.length);
+      const ok = document.execCommand('copy');
+      showStatus(ok
+        ? 'SESSION_ID copied to clipboard.'
+        : 'Could not copy automatically — long-press the text above and copy it manually.',
+        ok ? 'ok' : 'error');
+    } catch {
+      showStatus('Could not copy automatically — long-press the text above and copy it manually.', 'error');
+    }
+  }
 });
 
 // ---------- Socket events ----------
 socket.on('connect', () => {
   badge.textContent = 'connected';
   badge.className = 'conn-badge connected';
+  // A reconnect gets a brand-new server-side handler with no knowledge of the
+  // attempt that was in flight when the connection dropped — that attempt is
+  // orphaned and will never emit to this socket again. Leaving the spinner up
+  // reads as "the button does nothing", so reset and say what happened.
+  if (hadDisconnection && linking) {
+    resetToIdle();
+    showStatus('The connection dropped mid-link and that attempt was abandoned. Please start again.', 'warn');
+  }
+  hadDisconnection = false;
 });
 
 socket.on('disconnect', () => {
+  hadDisconnection = true;
   badge.textContent = 'disconnected';
   badge.className = 'conn-badge disconnected';
   if (linking) showStatus('Connection lost — reconnecting…', 'warn');
 });
 
-socket.on('reconnect', () => {
+// 'reconnect' is emitted on the Manager, not the Socket, in socket.io v4 —
+// `socket.on('reconnect')` never fired, so this handler was dead code.
+socket.io.on('reconnect', () => {
   badge.textContent = 'connected';
   badge.className = 'conn-badge connected';
-  if (linking) showStatus('Reconnected. If linking stalled, cancel and try again.', 'warn');
+});
+
+socket.on('connect_error', (err) => {
+  badge.textContent = 'disconnected';
+  badge.className = 'conn-badge disconnected';
+  showStatus('Cannot reach the session server: ' + (err && err.message ? err.message : 'unknown error'), 'error');
 });
 
 socket.on('qr', (data) => {
@@ -572,8 +645,16 @@ socket.on('pairing-code', (data) => {
 socket.on('connected', (data) => {
   linking = false;
   tabs.forEach(t => t.style.pointerEvents = '');
+  const sessionString = data && data.sessionString;
+  // A success event with no usable string is exactly the "linked but no
+  // session id" case — report it instead of revealing an empty box.
+  if (!sessionString || !String(sessionString).startsWith('MEGA~')) {
+    showStatus('WhatsApp reported the link succeeded but no session string came back. Please try again.', 'error');
+    resetToIdle();
+    return;
+  }
   showStatus(`Connected as ${data.user?.name || data.user?.id || 'device'}.`, 'ok');
-  showSession(data.sessionString);
+  showSession(sessionString);
   if (activeTab === 'qr') setStage(panes.qr, 'qr-done');
   else setStage(panes.pairing, 'pair-done');
 });

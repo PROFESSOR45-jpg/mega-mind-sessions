@@ -10,11 +10,11 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "socket.io": "^4.7.5",
-    "@whiskeysockets/baileys": "github:WhiskeySockets/Baileys#master",
-    "qrcode": "^1.5.3",
-    "pino": "^9.6.0",
-    "fs-extra": "^11.2.0"
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "express": "^4.22.2",
+    "fs-extra": "^11.4.0",
+    "pino": "^9.14.0",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.3"
   }
 }

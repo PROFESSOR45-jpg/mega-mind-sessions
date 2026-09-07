@@ -13,7 +13,8 @@ const {
     fetchLatestBaileysVersion,
     jidNormalizedUser,
     generateWAMessageFromContent,
-    proto
+    proto,
+    BufferJSON
 } = require('@whiskeysockets/baileys');
 const P = require('pino');
 const QRCode = require('qrcode');
@@ -40,6 +41,10 @@ const SESSIONS_DIR = path.join(__dirname, 'sessions');
 const RECORDS_DIR = path.join(__dirname, 'records');
 const SESSION_TTL_MS = 60 * 60 * 1000;
 const LINK_TIMEOUT_MS = 180 * 1000; // 3 min — enough for someone to actually find Linked Devices and type a code by hand, plus slow Render cold starts
+// How long the pairing flow waits for the WhatsApp handshake to finish before
+// requesting a code. Generous because Render cold starts are slow; the wait
+// itself ends as soon as the socket is ready, so this is only a ceiling.
+const PAIRING_READY_TIMEOUT_MS = 60 * 1000;
 
 fs.ensureDirSync(SESSIONS_DIR);
 fs.ensureDirSync(RECORDS_DIR);
@@ -68,6 +73,20 @@ app.get('/', async (_req, res) => {
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- helpers ----------
+
+// Races `promise` against a timer so a wait can never hang the linking flow
+// forever. Rejects with a readable message naming what timed out.
+function withTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            reject(new Error(`${label} (timed out after ${Math.round(ms / 1000)}s)`));
+        }, ms);
+        promise.then(
+            (value) => { clearTimeout(timer); resolve(value); },
+            (err) => { clearTimeout(timer); reject(err); }
+        );
+    });
+}
 
 function newSessionId() {
     return 'MM_' + crypto.randomBytes(12).toString('hex');
@@ -117,15 +136,36 @@ async function killSocket(sessionId) {
     }
 }
 
-async function buildPortableSession(sessionPath) {
-    // Wait up to 5s for creds.json to appear (creds.update can lag behind connection open)
-    const credsPath = path.join(sessionPath, 'creds.json');
-    for (let i = 0; i < 10; i++) {
-        if (await fs.pathExists(credsPath)) break;
-        await new Promise(r => setTimeout(r, 500));
+// Builds the portable MEGA~ session string.
+//
+// Serializes the LIVE in-memory creds instead of re-reading creds.json from
+// disk. Both of the old disk-based failure modes produced session strings
+// that looked fine here but were unusable:
+//
+//  1. saveCreds() writes creds.json asynchronously on every creds.update and
+//     Baileys does not await it, so reading the file right after registration
+//     completed could return a copy still carrying registered:false — or a
+//     half-written file that throws in JSON.parse. A registered:false session
+//     gets an immediate 401 (loggedOut) the first time the bot connects.
+//  2. The old existence check ("wait for creds.json to appear") passed as soon
+//     as the file existed, which happens on the first creds.update — long
+//     before registration — so it never actually waited for anything useful.
+//
+// The in-memory object is already authoritative by the time this is called:
+// the caller only reaches it after confirming sock.authState.creds.registered.
+// BufferJSON.replacer is precisely what useMultiFileAuthState uses to write
+// creds.json, so the output is byte-for-byte the shape the bot's
+// sessionManager.decodePortableSessionId() expects.
+function buildPortableSession(sock) {
+    const creds = sock?.authState?.creds;
+    if (!creds) throw new Error('socket has no auth state');
+    if (creds.registered !== true) {
+        throw new Error('creds.registered is not true yet');
     }
-    const creds = await fs.readJson(credsPath);
-    return 'MEGA~' + Buffer.from(JSON.stringify(creds)).toString('base64');
+    if (!creds.noiseKey) {
+        throw new Error('creds are missing noiseKey — not a usable login');
+    }
+    return 'MEGA~' + Buffer.from(JSON.stringify(creds, BufferJSON.replacer)).toString('base64');
 }
 
 // Same pattern used by the bot itself (MEGA-MIND-main/index.js) — sends the
@@ -208,10 +248,21 @@ io.on('connection', (socket) => {
     console.log('client connected:', socket.id);
 
     let currentSessionId = null;
-    let cancelled = false;
+    // Cancels the in-flight attempt, if any. Per-attempt rather than a single
+    // shared flag — see startLinking.
+    let cancelCurrent = null;
 
     async function startLinking({ method, phoneNumber }) {
-        cancelled = false;
+        // Supersede the previous attempt BEFORE tearing its socket down. That
+        // teardown produces a 'close' event on the old socket; with a shared
+        // flag the old handler would see cancelled === false and start its own
+        // retry loop, leaving two live Baileys sockets and two session ids
+        // racing to push pairing codes at the same browser. This is what
+        // happened whenever "Get a new code" was pressed.
+        if (cancelCurrent) cancelCurrent();
+
+        let cancelled = false;
+        cancelCurrent = () => { cancelled = true; };
 
         // Clean up previous attempt from this socket
         if (currentSessionId) {
@@ -282,6 +333,21 @@ io.on('connection', (socket) => {
             liveSockets.set(sessionId, sock);
             sock.ev.on('creds.update', saveCreds);
 
+            // Settled by the connection.update handler below: resolved once the
+            // WhatsApp handshake has completed (the earliest point a pairing
+            // code request will actually be honoured), rejected if the socket
+            // closes first. Recreated on every spawnSocket() so a retry never
+            // inherits an already-settled promise from the previous attempt.
+            let markReady;
+            let markNotReady;
+            const socketReady = new Promise((resolve, reject) => {
+                markReady = resolve;
+                markNotReady = reject;
+            });
+            // The QR flow never awaits this — swallow its rejection so a
+            // closed socket can't take the whole process down.
+            socketReady.catch(() => {});
+
             // KNOWN UPSTREAM BUG (WhiskeySockets/Baileys #2488 and #2737 —
             // confirmed still unresolved as of Sept 2026, and independently
             // reproduced in whatsmeow, a completely separate implementation
@@ -317,16 +383,27 @@ io.on('connection', (socket) => {
             });
 
             // ── Pairing method ──
-            // Per Baileys' own docs, requestPairingCode() should be called
-            // right after the socket is created (guarded by
-            // `!sock.authState.creds.registered`), NOT gated behind waiting
-            // for a 'qr' connection.update event. Waiting for 'qr' was
-            // fragile even before, and got worse on Baileys 7.x's new
-            // connection internals — the qr event can now arrive late, in a
-            // different order, or not fire in a way this code expects,
-            // which silently prevented requestPairingCode() from ever
-            // running. requestPairingCode() itself sends its request over
-            // the socket directly, so it doesn't need the qr event at all.
+            // requestPairingCode() must not run until the WhatsApp handshake
+            // has completed. Measured against baileys 7.0.0-rc14:
+            //     t≈685ms    sock.ws.isOpen flips true   (raw transport only)
+            //     t≈5070ms   first `qr` in connection.update (handshake done)
+            // and requestPairingCode() internally does:
+            //     code = bytesToCrockford(randomBytes(5))  // generated LOCALLY
+            //     await sendNode({ …link_code_companion_reg… })
+            //     return code
+            // sendNode → sendRawMessage only throws when !ws.isOpen, and it
+            // resolves as soon as the frame is *written* — it never waits for
+            // WhatsApp to acknowledge the registration. So calling it after
+            // the transport opened but before the handshake finished pushes
+            // the frame into a stream WhatsApp discards, and still returns a
+            // code. The browser displayed that code, the user typed it into
+            // WhatsApp, and WhatsApp rejected it: the "phone link does
+            // nothing" symptom. The previous fixed 3s sleep made this happen
+            // on essentially every attempt, and always on a cold Render dyno.
+            //
+            // The first `qr` is the reliable readiness signal — Baileys emits
+            // it only after the handshake succeeded and it has the refs. It is
+            // emitted for pairing sockets too; this flow just doesn't render it.
             if (method === 'pairing' && !pairingRequested) {
                 pairingRequested = true;
                 (async () => {
@@ -336,11 +413,19 @@ io.on('connection', (socket) => {
                             socket.emit('error', { message: 'Invalid phone number. Use country code + digits only, e.g. 254712345678' });
                             return;
                         }
-                        // Small delay so the socket finishes its initial
-                        // handshake before we request a code.
-                        await new Promise(r => setTimeout(r, 3000));
-                        if (cancelled || sock.authState.creds.registered) return;
+
+                        socket.emit('status', { message: 'Contacting WhatsApp…' });
+                        await withTimeout(socketReady, PAIRING_READY_TIMEOUT_MS, 'WhatsApp did not become ready');
+
+                        if (cancelled || linked) return;
+                        if (sock.authState.creds.registered) return;
+                        if (!sock.ws?.isOpen) {
+                            throw new Error('the connection to WhatsApp dropped before a code could be requested');
+                        }
+
                         const code = await sock.requestPairingCode(clean);
+                        if (!code) throw new Error('WhatsApp returned no pairing code');
+
                         // Format as XXXX-XXXX if 8 chars
                         const formatted = code.length === 8
                             ? code.slice(0, 4) + '-' + code.slice(4)
@@ -356,8 +441,17 @@ io.on('connection', (socket) => {
             }
 
             sock.ev.on('connection.update', async (update) => {
-                if (cancelled) return;
                 const { connection, lastDisconnect, qr } = update;
+
+                // Settle pairing readiness before anything can early-return out
+                // of this handler. A close has to reject it even when cancelled,
+                // otherwise the pairing flow sits waiting on a socket that is
+                // never coming back.
+                if (connection === 'close') {
+                    markNotReady(new Error('the WhatsApp connection closed before a pairing code could be requested'));
+                }
+
+                if (cancelled) return;
 
                 if (connection || lastDisconnect) {
                     logDiag('connection.update', {
@@ -366,6 +460,12 @@ io.on('connection', (socket) => {
                         closeCode: lastDisconnect?.error?.output?.statusCode || null
                     });
                 }
+
+                // Handshake finished, so a pairing code request will now
+                // actually be delivered. `qr` covers a fresh companion
+                // registration; `open` covers an already-registered reconnect.
+                // Both are no-ops once the promise has settled.
+                if (qr || connection === 'open') markReady();
 
                 // ── QR method ──
                 if (qr && method === 'qr') {
@@ -429,8 +529,9 @@ io.on('connection', (socket) => {
                     linked = true;
 
                     try {
-                        // Wait for creds.json to be fully written
-                        const portableSessionId = await buildPortableSession(sessionPath);
+                        // Serialize the live creds — see buildPortableSession
+                        // for why this must not re-read creds.json from disk.
+                        const portableSessionId = buildPortableSession(sock);
                         const record = {
                             status: 'connected',
                             method,
@@ -438,20 +539,33 @@ io.on('connection', (socket) => {
                             connectedAt: Date.now(),
                             portableSessionId
                         };
-                        await writeRecord(sessionId, record);
 
-                        // Frontend gets the session NOW — before any WhatsApp
-                        // message-sending is attempted below. This ordering
-                        // is deliberate: a stalled or slow sendMessage call
-                        // must never be able to delay or block the one thing
-                        // that actually matters (the page getting the
-                        // session), no matter what state the connection is in.
+                        // Frontend gets the session NOW — before the record is
+                        // persisted, and before any WhatsApp message-sending is
+                        // attempted below. This ordering is deliberate: a disk
+                        // failure or a stalled sendMessage must never be able
+                        // to cost the user the one thing that actually matters
+                        // (the page getting the session), no matter what state
+                        // the connection or the filesystem is in.
                         socket.emit('connected', {
                             sessionId,
                             user: record.user,
                             sessionString: portableSessionId
                         });
                         console.log(`[session ${sessionId}] linked as ${record.user?.id}`);
+
+                        try {
+                            await writeRecord(sessionId, record);
+                        } catch (err) {
+                            // The browser already has the session, so this only
+                            // affects the REST /session/:id lookup the bot uses
+                            // with AUTO_FETCH_SESSION. Say so rather than
+                            // swallowing it.
+                            console.error('[session] failed to persist record:', err.message);
+                            socket.emit('status', {
+                                message: `Warning: could not save the session record to disk (${err.message}). Copy the SESSION_ID from this page now — fetching it by id later will not work.`
+                            });
+                        }
 
                         // Everything below is best-effort convenience — send
                         // a status ping and the session as a "copy" button to
@@ -501,6 +615,19 @@ io.on('connection', (socket) => {
 
                 // ── Closed ──
                 if (connection === 'close') {
+                    // Check success/cancel FIRST. This used to sit below the
+                    // loggedOut branch, so a socket that closed with 401 AFTER
+                    // a successful link — including the deliberate sock.end()
+                    // this server performs 4s after handing the session over —
+                    // emitted 'error' and deleted the record. The frontend
+                    // reacted to that 'error' by hiding the SESSION_ID it had
+                    // just been given, and REST /session/:id (which the bot
+                    // uses with AUTO_FETCH_SESSION) started returning 404.
+                    // Once linked, the session is delivered and whatever
+                    // happens to this generator socket next is not the user's
+                    // problem.
+                    if (linked || cancelled) return;
+
                     const code = lastDisconnect?.error?.output?.statusCode;
                     const loggedOut = code === DisconnectReason.loggedOut;
 
@@ -512,8 +639,6 @@ io.on('connection', (socket) => {
                         await deleteRecord(sessionId);
                         return;
                     }
-
-                    if (linked || cancelled) return; // transient close after success/deliberate stop — ignore
 
                     // Connection dropped before linking — retry
                     retryCount++;
@@ -552,7 +677,10 @@ io.on('connection', (socket) => {
     });
 
     socket.on('cancel-session', async () => {
-        cancelled = true;
+        if (cancelCurrent) {
+            cancelCurrent();
+            cancelCurrent = null;
+        }
         if (currentSessionId) {
             await killSocket(currentSessionId);
             await deleteRecord(currentSessionId);
