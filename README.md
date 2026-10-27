@@ -21,9 +21,7 @@ npm test       # linking-flow tests (fake Baileys, no WhatsApp needed)
 ```
 
 Optional env vars: `PORT`, `BOT_TITLE`, `BOT_TAGLINE`, `OWNER_NAME`,
-`WA_BROWSER_NAME` (must match the name your bot connects with, default
-`MEGA MIND`), `DATA_DIR` (where `sessions/` and `records/` live),
-`MAX_LIVE_SOCKETS`.
+`DATA_DIR` (where `sessions/` and `records/` live), `MAX_LIVE_SOCKETS`.
 
 Open `http://localhost:3000` (or your deployed URL) and link via QR or
 pairing code. You'll be shown a `SESSION_ID` — this is the only thing the bot
@@ -79,6 +77,13 @@ Works on Render, Railway, or any standard Node host. Just needs:
   the 1-hour TTL (not required — losing them just means users re-link)
 
 ## What changed in 3.1 (why linking used to fail)
+
+- **Pairing codes were rejected instantly ("Couldn't link device").** The
+  Baileys `browser` tuple is `[OS, browser, version]`, and the old code put
+  `MEGA MIND` in the OS slot. WhatsApp rejects companion registration from an
+  unknown platform even though QR linking still works. The tuple is now
+  `['Ubuntu', 'Chrome', '22.04.4']` and must stay identical in the bot's
+  `index.js` / `lib/getSessionLocal.js`.
 
 - **QR never linked.** The server waited for `creds.registered === true` after
   the connection opened. Baileys 7 only ever sets that flag on the

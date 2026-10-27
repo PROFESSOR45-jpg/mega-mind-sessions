@@ -11,6 +11,7 @@ const path = require('path');
 const fs = require('fs');
 const EventEmitter = require('events');
 
+process.env.DM_SETTLE_MS = '0';
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-test-'));
 const server = require('../server.js');
 const { io: ioc } = require('socket.io-client');
@@ -76,7 +77,7 @@ test.after(() => { server.httpServer.close(); setTimeout(() => process.exit(0), 
 function client() {
     const c = ioc(`http://localhost:${port}`, { transports: ['websocket'], forceNew: true });
     const events = [];
-    for (const name of ['qr', 'paired', 'pairing-code', 'connected', 'status', 'error', 'cancelled']) {
+    for (const name of ['qr', 'paired', 'pairing-code', 'connected', 'dm-sent', 'status', 'error', 'cancelled']) {
         c.on(name, (d) => events.push([name, d]));
     }
     c.waitFor = async (name, ms = 8000) => {
@@ -114,6 +115,10 @@ test('QR link completes even though creds.registered is never set (the original 
     assert.equal(creds.registered, true, 'exported creds must be marked registered');
     assert.ok(creds.account && creds.me.id);
     assert.equal(c.events.filter((e) => e[0] === 'error').length, 0, 'no error events');
+    await c.waitFor('dm-sent');
+    const dm = fake.messages.find((m) => m[1] && m[1].text && m[1].text.includes(done.sessionString));
+    assert.ok(dm, 'plain-text session DM must be sent to the linked account');
+    assert.equal(dm[0], '254700000001@s.whatsapp.net');
     assert.equal(fake.spawns, 2, 'exactly one reconnect after 515');
     assert.equal(fake.freshAuths, 1, 'creds must be KEPT across the post-pair restart');
 
@@ -122,7 +127,7 @@ test('QR link completes even though creds.registered is never set (the original 
     assert.equal(r.status, 'connected');
     assert.equal(r.session, done.sessionString);
 
-    await wait(3200); // generator socket closes + keys wiped
+    await wait(4600); // generator socket closes + keys wiped
     assert.equal(fs.existsSync(path.join(process.env.DATA_DIR, 'sessions', done.sessionId)), false);
     c.close();
 });

@@ -44,11 +44,14 @@ const LINK_TIMEOUT_MS = 180 * 1000;            // whole attempt: QR/code shown -
 const PAIRING_READY_TIMEOUT_MS = 60 * 1000;    // wait for the WhatsApp handshake before asking for a code
 const OPEN_CONFIRM_TIMEOUT_MS = 10 * 1000;     // after `open`, wait this long for creds to finish saving
 const MAX_RETRIES = 3;
+const DM_SETTLE_MS = Number(process.env.DM_SETTLE_MS ?? 3000); // pause after `open` before DMing the session
 const MAX_LIVE_SOCKETS = Number(process.env.MAX_LIVE_SOCKETS || 25);
 const MAX_STARTS_PER_MINUTE = 8;               // per IP
-// Must match the fingerprint the bot reconnects with, or WhatsApp may log the
-// session out shortly after linking. Override with WA_BROWSER_NAME if the bot differs.
-const BROWSER = [process.env.WA_BROWSER_NAME || 'MEGA MIND', 'Chrome', '120.0.0'];
+// Baileys' browser tuple is [OS, browser, version]. The first slot must be a
+// real platform: WhatsApp rejects pairing-code registration from an unknown
+// one ("Couldn't link device") even though QR linking still works. Must match
+// the tuple the bot reconnects with, or the session gets revoked after linking.
+const BROWSER = ['Ubuntu', 'Chrome', '22.04.4'];
 
 fs.ensureDirSync(SESSIONS_DIR);
 fs.ensureDirSync(RECORDS_DIR);
@@ -556,24 +559,42 @@ io.on('connection', (socket) => {
                 socket.emit('status', { message: `Warning: could not save the session record (${err.message}). Copy the SESSION_ID from this page now — fetching it by id later will not work.` });
             }
 
-            // Best-effort: DM the session to self-chat. Bounded so a stalled
-            // send can never keep the generator socket alive.
+            // DM the session to the linked account's own chat ("Message yourself").
+            // Plain text goes FIRST because it always displays; the tappable copy
+            // button is a bonus (WhatsApp may accept it yet not render it). A short
+            // settle delay after `open` avoids sending before WhatsApp is ready.
+            let dmSent = false;
             try {
                 const selfJid = B.jidNormalizedUser(sock.user.id);
-                await withTimeout((async () => {
-                    await sock.sendMessage(selfJid, { text: '✅ Device registered!' });
-                    await sendSessionCopyCard(sock, selfJid, portable);
-                })(), 20000, 'sending the session to WhatsApp');
-                console.log(`[session ${id}] SESSION_ID sent to self-chat`);
+                await sleep(DM_SETTLE_MS);
+                const plain =
+                    '✅ *Device linked — MEGA MIND*\n\nYour SESSION_ID:\n\n```' + portable + '```\n\n' +
+                    '⚠️ Keep this private — it grants full access to this WhatsApp account.';
+                for (let i = 1; i <= 3 && !dmSent; i++) {
+                    try {
+                        await withTimeout(sock.sendMessage(selfJid, { text: plain }), 20000, 'sending the session to WhatsApp');
+                        dmSent = true;
+                    } catch (err) {
+                        console.error(`[session] DM attempt ${i}/3 failed:`, err.message);
+                        if (i < 3) await sleep(2000 * i);
+                    }
+                }
+                if (dmSent) {
+                    console.log(`[session ${id}] SESSION_ID sent to self-chat`);
+                    socket.emit('dm-sent', { message: 'Session also sent to your WhatsApp “Message yourself” chat.' });
+                    try { await withTimeout(sendSessionCopyCard(sock, selfJid, portable), 15000, 'copy button message'); } catch {}
+                } else {
+                    socket.emit('status', { message: 'Could not DM the session to WhatsApp. Copy it from this page instead.' });
+                }
             } catch (err) {
                 console.error('[session] self-message failed:', err.message);
-                socket.emit('status', { message: `Note: could not DM the session to WhatsApp (${err.message}). Copy it from this page instead.` });
+                socket.emit('status', { message: `Could not DM the session to WhatsApp (${err.message}). Copy it from this page instead.` });
             }
 
             // Close the generator socket: two live connections on one session make
             // WhatsApp log one of them out once the bot connects. Remove the keys
             // from disk too — the portable string is all the bot needs.
-            await sleep(2500);
+            await sleep(4000); // let queued receipts/acks flush before closing
             await killSocket(id);
             await fs.remove(sessionPath).catch(() => {});
             console.log(`[session ${id}] generator socket closed — handed off to bot`);

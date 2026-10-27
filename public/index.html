@@ -430,7 +430,7 @@
         <div class="session-head"><label for="session-text">SESSION_ID</label><span id="session-len"></span></div>
         <textarea id="session-text" readonly spellcheck="false" autocomplete="off"></textarea>
         <button class="copy-btn" id="copy-btn">Copy SESSION_ID</button>
-        <p class="session-tip">Set it as the <code>SESSION_ID</code> environment variable on your bot. A copy was also sent to your WhatsApp “Message yourself” chat.</p>
+        <p class="session-tip">Set it as the <code>SESSION_ID</code> environment variable on your bot. A copy is also sent to your WhatsApp “Message yourself” chat.</p>
       </section>
 
       <div class="status-line" id="status-line" role="status" aria-live="polite"></div>
@@ -805,6 +805,8 @@ socket.on('error', (data) => {
   showStatus((data && data.message) || 'Something went wrong.', 'error');
   resetToIdle();
 });
+
+socket.on('dm-sent', (data) => { showStatus(data.message, 'ok'); });
 
 socket.on('cancelled', () => { resetToIdle(); });
 </script>
