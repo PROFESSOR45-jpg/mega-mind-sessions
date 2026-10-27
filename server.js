@@ -208,7 +208,7 @@ async function sendSessionCopyCard(sock, jid, sessionString) {
     const preview = sessionString.slice(0, 18) + '…' + sessionString.slice(-6);
     const bodyText =
         `*🤖 MEGA MIND — Session Ready*\n\n` +
-        `Tap "Copy session" below, or copy it manually:\n\n` +
+        `Tap "Copy SESSION_ID" below, or copy it manually:\n\n` +
         '```' + sessionString + '```\n\n' +
         `⚠️ Keep this private — it grants full access to this WhatsApp account.`;
     try {
@@ -221,7 +221,7 @@ async function sendSessionCopyCard(sock, jid, sessionString) {
                         proto.Message.InteractiveMessage.NativeFlowMessage.NativeFlowButton.create({
                             name: 'cta_copy',
                             buttonParamsJson: JSON.stringify({
-                                display_text: 'Copy session',
+                                display_text: 'Copy SESSION_ID',
                                 id: 'copy_session_id',
                                 copy_code: sessionString
                             })
@@ -233,6 +233,9 @@ async function sendSessionCopyCard(sock, jid, sessionString) {
         const msg = generateWAMessageFromContent(jid, content, { userJid: sock.user.id });
         await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
     } catch (err) {
+        // Most clients only render cta_copy in a normal chat, not always in the
+        // "Message yourself" thread. The plain text body still carries the
+        // session, so a failed button never loses it.
         console.log(`[session] interactive copy button failed (${err.message}) — sending plain text instead.`);
         await sock.sendMessage(jid, { text: bodyText });
     }
@@ -582,7 +585,25 @@ io.on('connection', (socket) => {
                 if (dmSent) {
                     console.log(`[session ${id}] SESSION_ID sent to self-chat`);
                     socket.emit('dm-sent', { message: 'Session also sent to your WhatsApp “Message yourself” chat.' });
-                    try { await withTimeout(sendSessionCopyCard(sock, selfJid, portable), 15000, 'copy button message'); } catch {}
+                    // Let the plain text land first — WhatsApp can drop a second
+                    // message sent in the same instant.
+                    await sleep(1200);
+                    try {
+                        await withTimeout(sendSessionCopyCard(sock, selfJid, portable), 20000, 'copy button message');
+                    } catch (err) {
+                        console.error(`[session] copy-button message failed: ${err.message}`);
+                        // Guaranteed fallback: a .txt attachment can always be opened and copied.
+                        try {
+                            await withTimeout(sock.sendMessage(selfJid, {
+                                document: Buffer.from(portable, 'utf8'),
+                                fileName: 'MEGA-MIND-SESSION.txt',
+                                mimetype: 'text/plain',
+                            }), 20000, 'session document');
+                        } catch (err2) {
+                            console.error(`[session] session document failed: ${err2.message}`);
+                            socket.emit('status', { message: 'Could not send the session to your WhatsApp chat — copy it from this page.' });
+                        }
+                    }
                 } else {
                     socket.emit('status', { message: 'Could not DM the session to WhatsApp. Copy it from this page instead.' });
                 }

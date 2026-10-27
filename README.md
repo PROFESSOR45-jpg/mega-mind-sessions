@@ -78,6 +78,10 @@ Works on Render, Railway, or any standard Node host. Just needs:
 
 ## What changed in 3.1 (why linking used to fail)
 
+- **DM copy button.** After linking, the plain-text session DM is followed by a
+  *Copy SESSION_ID* button (`cta_copy`). If the client doesn't render buttons,
+  a `MEGA-MIND-SESSION.txt` attachment is sent instead — the session is always
+  copyable from the chat.
 - **Pairing codes were rejected instantly ("Couldn't link device").** The
   Baileys `browser` tuple is `[OS, browser, version]`, and the old code put
   `MEGA MIND` in the OS slot. WhatsApp rejects companion registration from an
