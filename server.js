@@ -212,26 +212,46 @@ async function sendSessionCopyCard(sock, jid, sessionString) {
         '```' + sessionString + '```\n\n' +
         `⚠️ Keep this private — it grants full access to this WhatsApp account.`;
     try {
+        // WhatsApp only renders native-flow buttons when the interactive message
+        // is wrapped in viewOnceMessage (with messageContextInfo) AND the relay
+        // carries the <biz><interactive type="native_flow"> routing node.
+        // Without both, the message is accepted but shows nothing / "can't view".
         const content = {
-            interactiveMessage: proto.Message.InteractiveMessage.create({
-                body: proto.Message.InteractiveMessage.Body.create({ text: bodyText }),
-                footer: proto.Message.InteractiveMessage.Footer.create({ text: `Session: ${preview}` }),
-                nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                    buttons: [
-                        proto.Message.InteractiveMessage.NativeFlowMessage.NativeFlowButton.create({
-                            name: 'cta_copy',
-                            buttonParamsJson: JSON.stringify({
-                                display_text: 'Copy SESSION_ID',
-                                id: 'copy_session_id',
-                                copy_code: sessionString
-                            })
+            viewOnceMessage: {
+                message: {
+                    messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+                    interactiveMessage: proto.Message.InteractiveMessage.create({
+                        body: proto.Message.InteractiveMessage.Body.create({ text: bodyText }),
+                        footer: proto.Message.InteractiveMessage.Footer.create({ text: `Session: ${preview}` }),
+                        nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+                            buttons: [
+                                {
+                                    name: 'cta_copy',
+                                    buttonParamsJson: JSON.stringify({
+                                        display_text: 'Copy SESSION_ID',
+                                        id: 'copy_session_id',
+                                        copy_code: sessionString
+                                    })
+                                }
+                            ]
                         })
-                    ]
-                })
-            })
+                    })
+                }
+            }
         };
         const msg = generateWAMessageFromContent(jid, content, { userJid: sock.user.id });
-        await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
+        await sock.relayMessage(jid, msg.message, {
+            messageId: msg.key.id,
+            additionalNodes: [{
+                tag: 'biz',
+                attrs: {},
+                content: [{
+                    tag: 'interactive',
+                    attrs: { type: 'native_flow', v: '1' },
+                    content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }]
+                }]
+            }]
+        });
     } catch (err) {
         // Most clients only render cta_copy in a normal chat, not always in the
         // "Message yourself" thread. The plain text body still carries the
