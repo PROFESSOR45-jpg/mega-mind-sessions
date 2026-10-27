@@ -16,8 +16,14 @@ and handing off sessions.
 
 ```bash
 npm install
-npm start
+npm start      # Node 18+
+npm test       # linking-flow tests (fake Baileys, no WhatsApp needed)
 ```
+
+Optional env vars: `PORT`, `BOT_TITLE`, `BOT_TAGLINE`, `OWNER_NAME`,
+`WA_BROWSER_NAME` (must match the name your bot connects with, default
+`MEGA MIND`), `DATA_DIR` (where `sessions/` and `records/` live),
+`MAX_LIVE_SOCKETS`.
 
 Open `http://localhost:3000` (or your deployed URL) and link via QR or
 pairing code. You'll be shown a `SESSION_ID` — this is the only thing the bot
@@ -71,3 +77,25 @@ Works on Render, Railway, or any standard Node host. Just needs:
 - Node 18+
 - A persistent disk if you want session records to survive restarts within
   the 1-hour TTL (not required — losing them just means users re-link)
+
+## What changed in 3.1 (why linking used to fail)
+
+- **QR never linked.** The server waited for `creds.registered === true` after
+  the connection opened. Baileys 7 only ever sets that flag on the
+  pairing-code path, so QR sessions timed out with "never finished confirming".
+  A finished link is now detected through `creds.account` (set on
+  `pair-success`), and the exported session is marked `registered: true`.
+- **Pairing retries reused half-registered creds.** After a dropped connection
+  the next attempt reused keys that already had the phone number written in by
+  `requestPairingCode`, which WhatsApp rejects. Retries before pairing now start
+  from clean keys and issue a fresh code.
+- **Post-scan restart (code 515)** is the normal next step after a successful
+  link; it is now handled as such and no longer eats into the retry budget.
+- **Duplicate sockets.** The `companion_reg_refresh` handler and "Get a new
+  code" could leave two live sockets racing; superseded sockets are now
+  retired so their close events can't restart anything.
+- **Baileys 7 is ESM-only.** It's loaded with `import()` so the server starts
+  on Node 18/20, not just very recent Node versions.
+- **Leaks.** Closing/refreshing the browser mid-link now frees the WhatsApp
+  socket and pending record; generator keys are wiped from disk after hand-off.
+- Per-IP start throttle and a global live-socket cap.

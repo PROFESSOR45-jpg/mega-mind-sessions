@@ -1,21 +1,23 @@
 /**
  * MEGA MIND SESSION SERVER
- * Standalone session generator (QR + Pairing Code) for MEGA MIND WhatsApp Bot.
+ * Standalone session generator (QR + Pairing Code) for the MEGA MIND WhatsApp bot.
+ *
+ * Fixes vs. the previous version (see README "What changed"):
+ *  - QR linking never completed: the old code waited for `creds.registered`,
+ *    which Baileys 7 only ever sets on the pairing-code path. A finished link is
+ *    now detected via `creds.account` (set by Baileys when pair-success arrives).
+ *  - Baileys 7 is ESM-only; it is now loaded with dynamic import() so the server
+ *    also starts on Node 18/20 (plain require() only works on very new Node).
+ *  - The post-pair "restart required" (515) close is handled as the expected step
+ *    it is, instead of being counted as a failed connection.
+ *  - Retries before pairing finished reused half-registered credentials, which
+ *    makes WhatsApp reject the next attempt; they now restart from clean keys.
+ *  - Abandoned attempts (browser closed / tab refreshed) no longer leak sockets.
  */
 
 const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
-const {
-    makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason,
-    fetchLatestBaileysVersion,
-    jidNormalizedUser,
-    generateWAMessageFromContent,
-    proto,
-    BufferJSON
-} = require('@whiskeysockets/baileys');
 const P = require('pino');
 const QRCode = require('qrcode');
 const fs = require('fs-extra');
@@ -31,39 +33,78 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3000;
-// Branding shown on the link page — defaults match the bot's own set.js
-// (BOT_TITLE / BOT_TAGLINE) so this page and the bot look like the same
-// product. Override with env vars if you rebrand the bot later.
 const BOT_TITLE = process.env.BOT_TITLE || 'PROFESSOR TECH';
 const BOT_TAGLINE = process.env.BOT_TAGLINE || 'MEGA-MIND BOT';
 const OWNER_NAME = process.env.OWNER_NAME || 'Professor';
-const SESSIONS_DIR = path.join(__dirname, 'sessions');
-const RECORDS_DIR = path.join(__dirname, 'records');
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
+const RECORDS_DIR = path.join(DATA_DIR, 'records');
 const SESSION_TTL_MS = 60 * 60 * 1000;
-const LINK_TIMEOUT_MS = 180 * 1000; // 3 min — enough for someone to actually find Linked Devices and type a code by hand, plus slow Render cold starts
-// How long the pairing flow waits for the WhatsApp handshake to finish before
-// requesting a code. Generous because Render cold starts are slow; the wait
-// itself ends as soon as the socket is ready, so this is only a ceiling.
-const PAIRING_READY_TIMEOUT_MS = 60 * 1000;
+const LINK_TIMEOUT_MS = 180 * 1000;            // whole attempt: QR/code shown -> linked
+const PAIRING_READY_TIMEOUT_MS = 60 * 1000;    // wait for the WhatsApp handshake before asking for a code
+const OPEN_CONFIRM_TIMEOUT_MS = 10 * 1000;     // after `open`, wait this long for creds to finish saving
+const MAX_RETRIES = 3;
+const MAX_LIVE_SOCKETS = Number(process.env.MAX_LIVE_SOCKETS || 25);
+const MAX_STARTS_PER_MINUTE = 8;               // per IP
+// Must match the fingerprint the bot reconnects with, or WhatsApp may log the
+// session out shortly after linking. Override with WA_BROWSER_NAME if the bot differs.
+const BROWSER = [process.env.WA_BROWSER_NAME || 'MEGA MIND', 'Chrome', '120.0.0'];
 
 fs.ensureDirSync(SESSIONS_DIR);
 fs.ensureDirSync(RECORDS_DIR);
 
-const liveSockets = new Map();
+const liveSockets = new Map(); // sessionId -> baileys socket
 
+// ---------- Baileys (ESM) loader ----------
+let B = null;
+async function loadBaileys() {
+    if (!B) {
+        const m = await import('@whiskeysockets/baileys');
+        B = {
+            makeWASocket: m.makeWASocket || m.default,
+            useMultiFileAuthState: m.useMultiFileAuthState,
+            DisconnectReason: m.DisconnectReason,
+            fetchLatestBaileysVersion: m.fetchLatestBaileysVersion,
+            jidNormalizedUser: m.jidNormalizedUser,
+            generateWAMessageFromContent: m.generateWAMessageFromContent,
+            proto: m.proto,
+            BufferJSON: m.BufferJSON,
+        };
+    }
+    return B;
+}
+
+let versionCache = null;
+async function getWaVersion() {
+    if (versionCache && Date.now() - versionCache.at < 10 * 60 * 1000) return versionCache.version;
+    try {
+        const { version } = await withTimeout(B.fetchLatestBaileysVersion(), 6000, 'WA version lookup');
+        if (Array.isArray(version)) {
+            versionCache = { version, at: Date.now() };
+            return version;
+        }
+    } catch (err) {
+        console.log('[version] lookup failed, using Baileys built-in default:', err.message);
+    }
+    return undefined; // undefined => let Baileys use its bundled default
+}
+
+// ---------- HTTP ----------
+app.disable('x-powered-by');
 app.use(express.json());
 
-// Serve the link page with branding placeholders filled in, so the page
-// shows the bot's actual identity (e.g. "PROFESSOR TECH") instead of a
-// generic name. Static middleware below still serves /assets/* normally.
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 app.get('/', async (_req, res) => {
     try {
         let html = await fs.readFile(path.join(__dirname, 'public', 'index.html'), 'utf8');
         html = html
-            .replace(/\{\{BOT_TITLE\}\}/g, BOT_TITLE)
-            .replace(/\{\{BOT_TAGLINE\}\}/g, BOT_TAGLINE)
-            .replace(/\{\{OWNER_NAME\}\}/g, OWNER_NAME);
-        res.set('Cache-Control', 'no-store'); // never serve a stale cached page after a redeploy
+            .replace(/\{\{BOT_TITLE\}\}/g, escapeHtml(BOT_TITLE))
+            .replace(/\{\{BOT_TAGLINE\}\}/g, escapeHtml(BOT_TAGLINE))
+            .replace(/\{\{OWNER_NAME\}\}/g, escapeHtml(OWNER_NAME));
+        res.set('Cache-Control', 'no-store');
         res.send(html);
     } catch (err) {
         res.status(500).send('Failed to load page: ' + err.message);
@@ -73,54 +114,51 @@ app.get('/', async (_req, res) => {
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- helpers ----------
-
-// Races `promise` against a timer so a wait can never hang the linking flow
-// forever. Rejects with a readable message naming what timed out.
 function withTimeout(promise, ms, label) {
     return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            reject(new Error(`${label} (timed out after ${Math.round(ms / 1000)}s)`));
-        }, ms);
+        const timer = setTimeout(() => reject(new Error(`${label} (timed out after ${Math.round(ms / 1000)}s)`)), ms);
         promise.then(
-            (value) => { clearTimeout(timer); resolve(value); },
-            (err) => { clearTimeout(timer); reject(err); }
+            (v) => { clearTimeout(timer); resolve(v); },
+            (e) => { clearTimeout(timer); reject(e); }
         );
     });
 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function newSessionId() {
     return 'MM_' + crypto.randomBytes(12).toString('hex');
 }
 
-// Session ids are always generated by newSessionId() — 'MM_' + 24 hex chars.
-// Anything else is rejected before it can touch the filesystem. Without this,
-// an id like "..%2Fsomething" (Express decodes %2F in route params) was joined
-// straight into a path, and the unauthenticated DELETE /session/:id route would
-// recursively delete whatever directory it pointed at.
+// Ids are always 'MM_' + 24 hex chars; anything else is rejected before it can
+// touch the filesystem (path traversal via the unauthenticated DELETE route).
 const SESSION_ID_RE = /^MM_[a-f0-9]{24}$/;
 function isValidSessionId(id) {
     return typeof id === 'string' && SESSION_ID_RE.test(id);
 }
-
 function recordPath(sessionId) {
     if (!isValidSessionId(sessionId)) throw new Error('invalid session id');
     return path.join(RECORDS_DIR, `${sessionId}.json`);
 }
-
 async function writeRecord(sessionId, record) {
     await fs.writeJson(recordPath(sessionId), record, { spaces: 2 });
 }
-
 async function readRecord(sessionId) {
     if (!isValidSessionId(sessionId)) return null;
-    try { return await fs.readJson(recordPath(sessionId)); }
-    catch { return null; }
+    try { return await fs.readJson(recordPath(sessionId)); } catch { return null; }
 }
-
 async function deleteRecord(sessionId) {
     if (!isValidSessionId(sessionId)) return;
     await fs.remove(recordPath(sessionId)).catch(() => {});
     await fs.remove(path.join(SESSIONS_DIR, sessionId)).catch(() => {});
+}
+
+async function killSocket(sessionId) {
+    const sock = liveSockets.get(sessionId);
+    if (sock) {
+        sock.__retired = true;
+        try { sock.end?.(undefined); } catch {}
+        liveSockets.delete(sessionId);
+    }
 }
 
 async function cleanupExpired() {
@@ -141,60 +179,35 @@ async function cleanupExpired() {
     }
 }
 
-async function killSocket(sessionId) {
-    const sock = liveSockets.get(sessionId);
-    if (sock) {
-        try { sock.end?.(undefined); } catch {}
-        liveSockets.delete(sessionId);
-    }
+// A link is only complete once WhatsApp has sent pair-success. Baileys stores
+// that as `creds.account` (+ the assigned `me` jid). NOTE: `creds.registered`
+// is NOT a reliable signal in Baileys 7 — it is only ever set on the
+// pairing-code path (and before pair-success there), and never for QR linking.
+function isPaired(creds) {
+    return !!(creds && creds.account && creds.me && creds.me.id);
 }
 
-// Builds the portable MEGA~ session string.
-//
-// Serializes the LIVE in-memory creds instead of re-reading creds.json from
-// disk. Both of the old disk-based failure modes produced session strings
-// that looked fine here but were unusable:
-//
-//  1. saveCreds() writes creds.json asynchronously on every creds.update and
-//     Baileys does not await it, so reading the file right after registration
-//     completed could return a copy still carrying registered:false — or a
-//     half-written file that throws in JSON.parse. A registered:false session
-//     gets an immediate 401 (loggedOut) the first time the bot connects.
-//  2. The old existence check ("wait for creds.json to appear") passed as soon
-//     as the file existed, which happens on the first creds.update — long
-//     before registration — so it never actually waited for anything useful.
-//
-// The in-memory object is already authoritative by the time this is called:
-// the caller only reaches it after confirming sock.authState.creds.registered.
-// BufferJSON.replacer is precisely what useMultiFileAuthState uses to write
-// creds.json, so the output is byte-for-byte the shape the bot's
-// sessionManager.decodePortableSessionId() expects.
-function buildPortableSession(sock) {
-    const creds = sock?.authState?.creds;
+// Builds the portable MEGA~ session string from the live in-memory creds
+// (never from creds.json, which is written asynchronously and can be stale or
+// half-written). `registered` is forced true for bots that check it.
+function buildPortableSession(creds) {
     if (!creds) throw new Error('socket has no auth state');
-    if (creds.registered !== true) {
-        throw new Error('creds.registered is not true yet');
-    }
-    if (!creds.noiseKey) {
-        throw new Error('creds are missing noiseKey — not a usable login');
-    }
-    return 'MEGA~' + Buffer.from(JSON.stringify(creds, BufferJSON.replacer)).toString('base64');
+    if (!isPaired(creds)) throw new Error('device is not fully paired yet');
+    if (!creds.noiseKey) throw new Error('creds are missing noiseKey — not a usable login');
+    const exported = { ...creds, registered: true };
+    return 'MEGA~' + Buffer.from(JSON.stringify(exported, B.BufferJSON.replacer)).toString('base64');
 }
 
-// Same pattern used by the bot itself (MEGA-MIND-main/index.js) — sends the
-// session as a tappable "copy" button (the same native-flow mechanism
-// WhatsApp uses for OTP messages). NOT an officially supported message type
-// for personal accounts, so the full string is always also included as
-// plain monospace text in the same message as a guaranteed fallback, and if
-// the button send throws outright, this falls back to a plain message.
+// Sends the session to self-chat as a tappable "copy" button with the full
+// string also in plain text as a guaranteed fallback.
 async function sendSessionCopyCard(sock, jid, sessionString) {
+    const { proto, generateWAMessageFromContent } = B;
     const preview = sessionString.slice(0, 18) + '…' + sessionString.slice(-6);
     const bodyText =
         `*🤖 MEGA MIND — Session Ready*\n\n` +
         `Tap "Copy session" below, or copy it manually:\n\n` +
         '```' + sessionString + '```\n\n' +
         `⚠️ Keep this private — it grants full access to this WhatsApp account.`;
-
     try {
         const content = {
             interactiveMessage: proto.Message.InteractiveMessage.create({
@@ -217,13 +230,12 @@ async function sendSessionCopyCard(sock, jid, sessionString) {
         const msg = generateWAMessageFromContent(jid, content, { userJid: sock.user.id });
         await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
     } catch (err) {
-        console.log(`[session] interactive copy button failed (${err.message}) — sending as plain text instead.`);
+        console.log(`[session] interactive copy button failed (${err.message}) — sending plain text instead.`);
         await sock.sendMessage(jid, { text: bodyText });
     }
 }
 
 // ---------- REST API ----------
-
 app.get('/session/:id', async (req, res) => {
     const record = await readRecord(req.params.id);
     if (!record) return res.status(404).json({ status: 'not_found' });
@@ -254,473 +266,372 @@ app.delete('/session/:id', async (req, res) => {
     res.json({ success: true });
 });
 
-app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
+app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime(), live: liveSockets.size }));
+
+// ---------- per-IP start throttle ----------
+const startLog = new Map(); // ip -> [timestamps]
+function allowStart(ip) {
+    const now = Date.now();
+    const recent = (startLog.get(ip) || []).filter((t) => now - t < 60 * 1000);
+    if (recent.length >= MAX_STARTS_PER_MINUTE) { startLog.set(ip, recent); return false; }
+    recent.push(now);
+    startLog.set(ip, recent);
+    return true;
+}
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, list] of startLog) {
+        const recent = list.filter((t) => now - t < 60 * 1000);
+        if (recent.length) startLog.set(ip, recent); else startLog.delete(ip);
+    }
+}, 5 * 60 * 1000).unref();
 
 // ---------- Socket.IO ----------
-
 io.on('connection', (socket) => {
+    const fwd = socket.handshake.headers['x-forwarded-for'];
+    const ip = (fwd ? String(fwd).split(',')[0].trim() : socket.handshake.address) || 'unknown';
     console.log('client connected:', socket.id);
 
-    let currentSessionId = null;
-    // Cancels the in-flight attempt, if any. Per-attempt rather than a single
-    // shared flag — see startLinking.
-    let cancelCurrent = null;
+    let current = null;        // the in-flight attempt for this browser connection
+    let queue = Promise.resolve();
 
-    async function startLinking({ method, phoneNumber }) {
-        // Supersede the previous attempt BEFORE tearing its socket down. That
-        // teardown produces a 'close' event on the old socket; with a shared
-        // flag the old handler would see cancelled === false and start its own
-        // retry loop, leaving two live Baileys sockets and two session ids
-        // racing to push pairing codes at the same browser. This is what
-        // happened whenever "Get a new code" was pressed.
-        if (cancelCurrent) cancelCurrent();
+    // Fully stops an attempt. Safe to call repeatedly. Deletes the pending
+    // record/keys unless the link already succeeded (the bot may still fetch it).
+    async function teardown(attempt) {
+        if (!attempt) return;
+        attempt.done = true;
+        clearTimeout(attempt.timer);
+        await killSocket(attempt.id);
+        if (!attempt.linked) await deleteRecord(attempt.id);
+        if (current === attempt) current = null;
+    }
 
-        let cancelled = false;
-        cancelCurrent = () => { cancelled = true; };
+    async function startLinking(payload) {
+        const method = payload && payload.method === 'pairing' ? 'pairing' : 'qr';
+        const phone = String((payload && payload.phoneNumber) || '').replace(/\D/g, '');
 
-        // Clean up previous attempt from this socket
-        if (currentSessionId) {
-            await killSocket(currentSessionId);
-            await deleteRecord(currentSessionId);
+        if (method === 'pairing' && (phone.length < 7 || phone.length > 15)) {
+            socket.emit('error', { message: 'Invalid phone number. Use country code + digits only, e.g. 254712345678' });
+            return;
+        }
+        if (!allowStart(ip)) {
+            socket.emit('error', { message: 'Too many attempts. Please wait a minute and try again.' });
+            return;
         }
 
-        const sessionId = newSessionId();
-        currentSessionId = sessionId;
-        const sessionPath = path.join(SESSIONS_DIR, sessionId);
+        // Supersede any previous attempt FIRST so its teardown-induced `close`
+        // can never start a retry loop of its own.
+        await teardown(current);
 
+        if (liveSockets.size >= MAX_LIVE_SOCKETS) {
+            socket.emit('error', { message: 'The server is busy linking other devices. Please try again in a minute.' });
+            return;
+        }
+
+        await loadBaileys();
+
+        const id = newSessionId();
+        const sessionPath = path.join(SESSIONS_DIR, id);
         await fs.ensureDir(sessionPath);
-        await writeRecord(sessionId, { status: 'pending', method, createdAt: Date.now() });
+        await writeRecord(id, { status: 'pending', method, createdAt: Date.now() });
 
-        let pairingRequested = false;
-        let qrCount = 0;
-        let retryCount = 0;
-        const MAX_RETRIES = 3;
-        let linked = false;
+        const attempt = {
+            id, method, phone,
+            done: false,      // finished one way or the other — nothing may restart it
+            linked: false,
+            retries: 0,
+            freshAuth: true,  // start from clean keys
+            auth: null,       // { state, saveCreds }
+            timer: null,
+        };
+        current = attempt;
 
-        function logDiag(event, data) {
-            // Lightweight diagnostic trail (no creds/keys) so a stuck link
-            // attempt can actually be debugged after the fact instead of
-            // failing silently.
-            console.log(`[diag ${sessionId}] ${event}`, data || '');
+        const log = (event, data) => console.log(`[diag ${id}] ${event}`, data || '');
+
+        async function fail(message) {
+            if (attempt.done) return;
+            log('failed', { message });
+            socket.emit('error', { message });
+            await teardown(attempt);
         }
 
-        // NOTE: there used to be an automatic "regenerate the code after
-        // 40s of silence" timer here. Removed — it fired well before a
-        // person could realistically open WhatsApp, find Linked Devices,
-        // and type an 8-character code, so codes were changing out from
-        // under people mid-entry. Regeneration is now manual only (the
-        // "Get a new code" button on the pairing screen), and the overall
-        // window below is long enough to actually use the code.
-        const linkTimer = setTimeout(async () => {
-            if (linked || cancelled) return;
-            const record = await readRecord(sessionId);
-            if (record && record.status !== 'connected') {
-                socket.emit('error', { message: 'Timed out waiting for WhatsApp to confirm the link. If you entered the code and nothing happened, this is a known WhatsApp-side issue right now — tap "Get a new code" and try again.' });
-                await killSocket(sessionId);
-                await deleteRecord(sessionId);
-            }
+        attempt.timer = setTimeout(() => {
+            if (attempt.done || attempt.linked) return;
+            fail('Timed out waiting for WhatsApp to confirm the link. If you scanned/entered the code and nothing happened, tap start again for a fresh one.');
         }, LINK_TIMEOUT_MS);
 
-        async function spawnSocket() {
-            if (cancelled) return;
+        async function spawn() {
+            if (attempt.done) return;
 
-            // Always re-read state from disk (creds may have been partially saved)
-            const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-            const { version } = await fetchLatestBaileysVersion();
+            // Before pairing has completed, always start from clean keys: a
+            // retry that reuses creds from a half-finished registration (e.g.
+            // `me` set by requestPairingCode) makes WhatsApp reject the login.
+            // After pair-success the creds ARE the device — keep them.
+            if (attempt.freshAuth || !attempt.auth) {
+                await fs.emptyDir(sessionPath);
+                attempt.auth = await B.useMultiFileAuthState(sessionPath);
+                attempt.freshAuth = false;
+            }
+            const { state, saveCreds } = attempt.auth;
 
-            const sock = makeWASocket({
-                version,
+            const config = {
                 auth: state,
                 logger: P({ level: 'silent' }),
                 printQRInTerminal: false,
-                // Must match the browser fingerprint the bot itself uses to
-                // reconnect (MEGA-MIND-main/index.js). A mismatch here is
-                // what causes WhatsApp to log the session back out shortly
-                // after linking — it looks like a different device.
-                browser: ['MEGA MIND', 'Chrome', '120.0.0'],
+                browser: BROWSER,
                 syncFullHistory: false,
+                markOnlineOnConnect: false,
                 connectTimeoutMs: 60000,
                 defaultQueryTimeoutMs: 60000,
                 keepAliveIntervalMs: 10000,
-            });
+            };
+            const version = await getWaVersion();
+            if (version) config.version = version; // never pass `version: undefined` — it would override Baileys' default
+            if (attempt.done) return;
 
-            liveSockets.set(sessionId, sock);
+            const sock = B.makeWASocket(config);
+            sock.__retired = false;
+            liveSockets.set(id, sock);
             sock.ev.on('creds.update', saveCreds);
 
-            // Settled by the connection.update handler below: resolved once the
-            // WhatsApp handshake has completed (the earliest point a pairing
-            // code request will actually be honoured), rejected if the socket
-            // closes first. Recreated on every spawnSocket() so a retry never
-            // inherits an already-settled promise from the previous attempt.
-            let markReady;
-            let markNotReady;
-            const socketReady = new Promise((resolve, reject) => {
-                markReady = resolve;
-                markNotReady = reject;
-            });
-            // The QR flow never awaits this — swallow its rejection so a
-            // closed socket can't take the whole process down.
+            let markReady, markNotReady;
+            const socketReady = new Promise((resolve, reject) => { markReady = resolve; markNotReady = reject; });
             socketReady.catch(() => {});
 
-            // KNOWN UPSTREAM BUG (WhiskeySockets/Baileys #2488 and #2737 —
-            // confirmed still unresolved as of Sept 2026, and independently
-            // reproduced in whatsmeow, a completely separate implementation
-            // — so this is WhatsApp-server-side, not a Baileys-specific
-            // bug). Partway through registration, WhatsApp sends a raw
-            // <notification type="companion_reg_refresh"> meaning the
-            // in-progress registration material has been retired and must
-            // be redone with a fresh code/QR. Baileys currently just acks
-            // and discards this notification instead of acting on it, so
-            // pair-success never arrives and the attempt silently stalls.
-            // We can't patch Baileys' internals from here, but sock.ws is a
-            // real EventEmitter exposed on the socket — so we listen for the
-            // same raw event ourselves and react immediately: restart with a
-            // completely fresh code, the practical equivalent of the
-            // rotation a proper fix would do, instead of waiting out the
-            // full generic timeout for something already unrecoverable.
-            let regRefreshHandled = false;
-            sock.ws.on('CB:notification', (node) => {
-                if (regRefreshHandled || cancelled || linked) return;
-                if (node?.attrs?.type !== 'companion_reg_refresh') return;
-                regRefreshHandled = true;
-                logDiag('companion_reg_refresh received — known upstream WhatsApp bug, restarting with a fresh code', {});
-                socket.emit('status', {
-                    message: 'WhatsApp retired this registration mid-way (a known current WhatsApp-side issue) — generating a fresh code automatically…'
-                });
-                (async () => {
-                    pairingRequested = false;
-                    await killSocket(sessionId);
-                    spawnSocket().catch(err => {
-                        socket.emit('error', { message: 'Auto-restart failed: ' + err.message });
-                    });
-                })();
-            });
+            const stale = () => sock.__retired || attempt.done;
 
-            // ── Pairing method ──
-            // requestPairingCode() must not run until the WhatsApp handshake
-            // has completed. Measured against baileys 7.0.0-rc14:
-            //     t≈685ms    sock.ws.isOpen flips true   (raw transport only)
-            //     t≈5070ms   first `qr` in connection.update (handshake done)
-            // and requestPairingCode() internally does:
-            //     code = bytesToCrockford(randomBytes(5))  // generated LOCALLY
-            //     await sendNode({ …link_code_companion_reg… })
-            //     return code
-            // sendNode → sendRawMessage only throws when !ws.isOpen, and it
-            // resolves as soon as the frame is *written* — it never waits for
-            // WhatsApp to acknowledge the registration. So calling it after
-            // the transport opened but before the handshake finished pushes
-            // the frame into a stream WhatsApp discards, and still returns a
-            // code. The browser displayed that code, the user typed it into
-            // WhatsApp, and WhatsApp rejected it: the "phone link does
-            // nothing" symptom. The previous fixed 3s sleep made this happen
-            // on essentially every attempt, and always on a cold Render dyno.
-            //
-            // The first `qr` is the reliable readiness signal — Baileys emits
-            // it only after the handshake succeeded and it has the refs. It is
-            // emitted for pairing sockets too; this flow just doesn't render it.
-            if (method === 'pairing' && !pairingRequested) {
-                pairingRequested = true;
+            // Raw notification some WhatsApp builds send mid-registration that
+            // Baileys ignores. Only act on it BEFORE pairing finished, and mark
+            // the old socket retired so its close event cannot spawn a second one.
+            if (sock.ws && typeof sock.ws.on === 'function') {
+                let handled = false;
+                sock.ws.on('CB:notification', (node) => {
+                    if (handled || stale() || isPaired(state.creds)) return;
+                    if (node?.attrs?.type !== 'companion_reg_refresh') return;
+                    handled = true;
+                    log('companion_reg_refresh — restarting with fresh keys');
+                    socket.emit('status', { message: 'WhatsApp reset this registration — generating a fresh one automatically…' });
+                    attempt.freshAuth = true;
+                    killSocket(id).then(() => spawn()).catch((err) => fail('Auto-restart failed: ' + err.message));
+                });
+            }
+
+            // ── Pairing code ──
+            // requestPairingCode() resolves as soon as the frame is *written*, and
+            // WhatsApp discards it if the handshake hasn't finished. The first `qr`
+            // (also emitted for pairing sockets) is the reliable readiness signal.
+            if (attempt.method === 'pairing' && !isPaired(state.creds)) {
                 (async () => {
                     try {
-                        const clean = (phoneNumber || '').replace(/\D/g, '');
-                        if (!clean || clean.length < 7) {
-                            socket.emit('error', { message: 'Invalid phone number. Use country code + digits only, e.g. 254712345678' });
-                            return;
-                        }
-
                         socket.emit('status', { message: 'Contacting WhatsApp…' });
                         await withTimeout(socketReady, PAIRING_READY_TIMEOUT_MS, 'WhatsApp did not become ready');
+                        if (stale()) return;
+                        if (!sock.ws?.isOpen) throw new Error('the connection to WhatsApp dropped before a code could be requested');
 
-                        if (cancelled || linked) return;
-                        if (sock.authState.creds.registered) return;
-                        if (!sock.ws?.isOpen) {
-                            throw new Error('the connection to WhatsApp dropped before a code could be requested');
-                        }
-
-                        const code = await sock.requestPairingCode(clean);
+                        const code = await sock.requestPairingCode(attempt.phone);
                         if (!code) throw new Error('WhatsApp returned no pairing code');
+                        if (stale()) return;
 
-                        // Format as XXXX-XXXX if 8 chars
-                        const formatted = code.length === 8
-                            ? code.slice(0, 4) + '-' + code.slice(4)
-                            : code;
-                        socket.emit('pairing-code', { code: formatted, sessionId });
-                        logDiag('pairing-code issued', {});
+                        const formatted = code.length === 8 ? code.slice(0, 4) + '-' + code.slice(4) : code;
+                        socket.emit('pairing-code', { code: formatted, sessionId: id });
+                        log('pairing-code issued');
                     } catch (err) {
-                        pairingRequested = false; // allow retry on reconnect
+                        if (stale()) return;
                         console.error('[pairing] requestPairingCode failed:', err.message);
-                        socket.emit('error', { message: 'Could not get pairing code: ' + err.message });
+                        // A close-before-ready is handled by the retry logic below.
+                        if (/closed before a pairing code/.test(err.message)) return;
+                        await fail('Could not get pairing code: ' + err.message);
                     }
                 })();
             }
 
             sock.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, qr } = update;
+                const { connection, lastDisconnect, qr, isNewLogin } = update;
 
-                // Settle pairing readiness before anything can early-return out
-                // of this handler. A close has to reject it even when cancelled,
-                // otherwise the pairing flow sits waiting on a socket that is
-                // never coming back.
                 if (connection === 'close') {
                     markNotReady(new Error('the WhatsApp connection closed before a pairing code could be requested'));
                 }
+                if (stale()) return;
 
-                if (cancelled) return;
-
-                if (connection || lastDisconnect) {
-                    logDiag('connection.update', {
-                        connection,
-                        hasQr: !!qr,
+                if (connection || lastDisconnect || isNewLogin) {
+                    log('connection.update', {
+                        connection, hasQr: !!qr, isNewLogin: !!isNewLogin,
                         closeCode: lastDisconnect?.error?.output?.statusCode || null
                     });
                 }
 
-                // Handshake finished, so a pairing code request will now
-                // actually be delivered. `qr` covers a fresh companion
-                // registration; `open` covers an already-registered reconnect.
-                // Both are no-ops once the promise has settled.
                 if (qr || connection === 'open') markReady();
 
-                // ── QR method ──
-                if (qr && method === 'qr') {
-                    qrCount++;
+                // ── QR ──
+                if (qr && attempt.method === 'qr') {
+                    attempt.qrCount = (attempt.qrCount || 0) + 1;
                     try {
-                        const dataUrl = await QRCode.toDataURL(qr);
-                        socket.emit('qr', { qr: dataUrl, sessionId, attempt: qrCount });
+                        const dataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 440, errorCorrectionLevel: 'M' });
+                        if (!stale()) socket.emit('qr', { qr: dataUrl, sessionId: id, attempt: attempt.qrCount });
                     } catch {
                         socket.emit('error', { message: 'Failed to render QR code.' });
                     }
                 }
 
+                // The phone accepted the link; WhatsApp now restarts the connection.
+                if (isNewLogin) socket.emit('paired', { message: 'Device paired — finishing setup…' });
 
-                // ── Connected ──
+                // ── Open ──
                 if (connection === 'open') {
-                    clearTimeout(linkTimer);
-
-                    // 'open' means the socket/transport connected — it does
-                    // NOT guarantee WhatsApp finished registering this as a
-                    // linked device. creds.registered is the field that
-                    // actually tracks that. Handing out a session captured
-                    // while registered is still false produces a session
-                    // that looks fine here but gets an immediate 401
-                    // (loggedOut) the first time the bot tries to use it —
-                    // this was happening silently before. WhatsApp sometimes
-                    // flips registered=true a moment after 'open' fires, so
-                    // poll briefly instead of failing instantly.
-                    // IMPORTANT: never attempt sock.sendMessage() before
-                    // creds.registered is confirmed true. WhatsApp won't ack
-                    // a message send from a companion device that hasn't
-                    // finished registering — the call can hang indefinitely
-                    // instead of erroring, which silently blocks this entire
-                    // handler from ever reaching the code below that builds
-                    // and emits the session. (An earlier version of this file
-                    // tried to send a live "confirming registration…" status
-                    // ping during the wait itself — that was the actual bug.)
-                    let waitedMs = 0;
-
-                    if (!sock.authState.creds.registered) {
-                        logDiag('open fired but not yet registered — waiting briefly', {});
-                        const POLL_MS = 500;
-                        const MAX_WAIT_MS = 25 * 1000; // was 8s — too short; WhatsApp's confirmation can genuinely take longer than that during the known intermittent issue
-                        while (!sock.authState.creds.registered && waitedMs < MAX_WAIT_MS && !cancelled) {
-                            await new Promise(r => setTimeout(r, POLL_MS));
-                            waitedMs += POLL_MS;
-                        }
-                        if (cancelled) return;
-                        if (!sock.authState.creds.registered) {
-                            logDiag('registration never completed after open', { waitedMs });
-                            socket.emit('error', {
-                                message: 'WhatsApp connected but never finished confirming the device link — this matches a known intermittent WhatsApp issue, not a problem with your phone number. Please try linking again.'
-                            });
-                            cancelled = true; // done — the close event killSocket() triggers next must not retry over this
-                            await killSocket(sessionId);
-                            await deleteRecord(sessionId);
-                            return;
-                        }
-                        logDiag('registration completed after wait', { waitedMs });
+                    // `open` on the post-pair restart socket arrives with the new
+                    // creds already loaded. Allow a short grace period in case the
+                    // account info is still being merged.
+                    const deadline = Date.now() + OPEN_CONFIRM_TIMEOUT_MS;
+                    while (!isPaired(state.creds) && Date.now() < deadline && !stale()) await sleep(250);
+                    if (stale()) return;
+                    if (!isPaired(state.creds)) {
+                        await fail('WhatsApp connected but the device link did not complete. Please try again.');
+                        return;
                     }
-
-                    linked = true;
-
-                    try {
-                        // Serialize the live creds — see buildPortableSession
-                        // for why this must not re-read creds.json from disk.
-                        const portableSessionId = buildPortableSession(sock);
-                        const record = {
-                            status: 'connected',
-                            method,
-                            user: sock.user ? { id: sock.user.id, name: sock.user.name } : null,
-                            connectedAt: Date.now(),
-                            portableSessionId
-                        };
-
-                        // Frontend gets the session NOW — before the record is
-                        // persisted, and before any WhatsApp message-sending is
-                        // attempted below. This ordering is deliberate: a disk
-                        // failure or a stalled sendMessage must never be able
-                        // to cost the user the one thing that actually matters
-                        // (the page getting the session), no matter what state
-                        // the connection or the filesystem is in.
-                        socket.emit('connected', {
-                            sessionId,
-                            user: record.user,
-                            sessionString: portableSessionId
-                        });
-                        console.log(`[session ${sessionId}] linked as ${record.user?.id}`);
-
-                        try {
-                            await writeRecord(sessionId, record);
-                        } catch (err) {
-                            // The browser already has the session, so this only
-                            // affects the REST /session/:id lookup the bot uses
-                            // with AUTO_FETCH_SESSION. Say so rather than
-                            // swallowing it.
-                            console.error('[session] failed to persist record:', err.message);
-                            socket.emit('status', {
-                                message: `Warning: could not save the session record to disk (${err.message}). Copy the SESSION_ID from this page now — fetching it by id later will not work.`
-                            });
-                        }
-
-                        // Everything below is best-effort convenience — send
-                        // a status ping and the session as a "copy" button to
-                        // self-chat. Safe to attempt now (registration is
-                        // confirmed at this point), but still non-fatal if
-                        // any of it fails or is slow.
-                        try {
-                            const selfJid = jidNormalizedUser(sock.user.id);
-                            const statusText = waitedMs > 0
-                                ? `✅ Device registered (confirmed after ${Math.round(waitedMs / 1000)}s)!`
-                                : '✅ Device registered!';
-                            await sock.sendMessage(selfJid, { text: statusText });
-
-                            // Send SESSION_ID to self-chat as a tappable "copy"
-                            // button (with a guaranteed plain-text fallback
-                            // baked into the same message — see
-                            // sendSessionCopyCard). sock.user.id includes a
-                            // ":<deviceId>" suffix; must be normalized via
-                            // jidNormalizedUser or sendMessage silently fails.
-                            await sendSessionCopyCard(sock, selfJid, portableSessionId);
-                            console.log(`[session ${sessionId}] SESSION_ID sent to self-chat`);
-                        } catch (err) {
-                            // Still non-fatal — the page already has the
-                            // session ID regardless — but surfaced to the
-                            // frontend so it isn't silently swallowed.
-                            console.error('[session] self-message failed:', err.message);
-                            socket.emit('status', { message: `Note: could not DM the session to WhatsApp (${err.message}). Copy it from this page instead.` });
-                        }
-
-                        // IMPORTANT: close this socket once the session has been
-                        // captured and handed off. Leaving it alive (it used to
-                        // sit in liveSockets until the 1hr cleanup) meant TWO
-                        // active WhatsApp connections shared the same session —
-                        // this server's, and the bot's own once it reconnects
-                        // with the SESSION_ID. WhatsApp treats that as a device
-                        // conflict and force-logs-out one of them, which is what
-                        // was causing the repeated logouts after QR linking.
-                        setTimeout(async () => {
-                            await killSocket(sessionId);
-                            console.log(`[session ${sessionId}] generator socket closed — handed off to bot`);
-                        }, 4000);
-                    } catch (err) {
-                        console.error('[session] finalize error:', err.message);
-                        socket.emit('error', { message: 'Linked but failed to save session: ' + err.message });
-                    }
+                    await finalize(sock, state);
+                    return;
                 }
 
-                // ── Closed ──
+                // ── Close ──
                 if (connection === 'close') {
-                    // Check success/cancel FIRST. This used to sit below the
-                    // loggedOut branch, so a socket that closed with 401 AFTER
-                    // a successful link — including the deliberate sock.end()
-                    // this server performs 4s after handing the session over —
-                    // emitted 'error' and deleted the record. The frontend
-                    // reacted to that 'error' by hiding the SESSION_ID it had
-                    // just been given, and REST /session/:id (which the bot
-                    // uses with AUTO_FETCH_SESSION) started returning 404.
-                    // Once linked, the session is delivered and whatever
-                    // happens to this generator socket next is not the user's
-                    // problem.
-                    if (linked || cancelled) return;
-
                     const code = lastDisconnect?.error?.output?.statusCode;
-                    const loggedOut = code === DisconnectReason.loggedOut;
 
-                    if (loggedOut) {
-                        clearTimeout(linkTimer);
-                        socket.emit('error', { message: 'WhatsApp logged out the session. Please try again.' });
-                        cancelled = true;
-                        await killSocket(sessionId);
-                        await deleteRecord(sessionId);
+                    if (code === B.DisconnectReason.loggedOut) {
+                        await fail('WhatsApp logged out the session. Please try again.');
                         return;
                     }
 
-                    // Connection dropped before linking — retry
-                    retryCount++;
-                    console.log(`[session ${sessionId}] closed (code ${code}), retry ${retryCount}/${MAX_RETRIES}`);
-
-                    if (retryCount > MAX_RETRIES) {
-                        clearTimeout(linkTimer);
-                        socket.emit('error', { message: `Failed to connect after ${MAX_RETRIES} attempts. Please try again.` });
-                        cancelled = true;
-                        await killSocket(sessionId);
-                        await deleteRecord(sessionId);
+                    // 515 is the NORMAL step after a successful scan/code entry:
+                    // WhatsApp asks the companion to reconnect with its new creds.
+                    if (code === B.DisconnectReason.restartRequired) {
+                        log('restart required after pairing — reconnecting with saved creds');
+                        attempt.freshAuth = !isPaired(state.creds);
+                        await killSocket(id);
+                        if (attempt.done) return;
+                        spawn().catch((err) => fail('Reconnect failed: ' + err.message));
                         return;
                     }
 
-                    socket.emit('status', { message: `Connection dropped — retrying (${retryCount}/${MAX_RETRIES})…` });
-                    pairingRequested = false;
-
-                    await new Promise(r => setTimeout(r, retryCount * 2000));
-                    if (cancelled) return;
-
-                    await killSocket(sessionId);
-                    spawnSocket().catch(err => {
-                        socket.emit('error', { message: 'Reconnect failed: ' + err.message });
-                    });
+                    attempt.retries++;
+                    log(`closed (code ${code}), retry ${attempt.retries}/${MAX_RETRIES}`);
+                    if (attempt.retries > MAX_RETRIES) {
+                        await fail(`Failed to connect after ${MAX_RETRIES} attempts. Please try again.`);
+                        return;
+                    }
+                    socket.emit('status', { message: `Connection dropped — retrying (${attempt.retries}/${MAX_RETRIES})…` });
+                    await sleep(attempt.retries * 2000);
+                    if (attempt.done) return;
+                    attempt.freshAuth = !isPaired(state.creds);
+                    await killSocket(id);
+                    spawn().catch((err) => fail('Reconnect failed: ' + err.message));
                 }
             });
         }
 
-        await spawnSocket();
+        async function finalize(sock, state) {
+            if (attempt.linked || attempt.done) return;
+            attempt.linked = true;
+            clearTimeout(attempt.timer);
+
+            let portable;
+            try {
+                portable = buildPortableSession(state.creds);
+            } catch (err) {
+                attempt.linked = false;
+                await fail('Linked but could not build the session: ' + err.message);
+                return;
+            }
+
+            const user = sock.user ? { id: sock.user.id, name: sock.user.name } : (state.creds.me ? { id: state.creds.me.id, name: state.creds.me.name } : null);
+            const record = { status: 'connected', method: attempt.method, user, connectedAt: Date.now(), portableSessionId: portable };
+
+            // The browser gets the session before anything else can fail or stall.
+            socket.emit('connected', { sessionId: id, user, sessionString: portable });
+            console.log(`[session ${id}] linked as ${user?.id}`);
+
+            try {
+                await writeRecord(id, record);
+            } catch (err) {
+                console.error('[session] failed to persist record:', err.message);
+                socket.emit('status', { message: `Warning: could not save the session record (${err.message}). Copy the SESSION_ID from this page now — fetching it by id later will not work.` });
+            }
+
+            // Best-effort: DM the session to self-chat. Bounded so a stalled
+            // send can never keep the generator socket alive.
+            try {
+                const selfJid = B.jidNormalizedUser(sock.user.id);
+                await withTimeout((async () => {
+                    await sock.sendMessage(selfJid, { text: '✅ Device registered!' });
+                    await sendSessionCopyCard(sock, selfJid, portable);
+                })(), 20000, 'sending the session to WhatsApp');
+                console.log(`[session ${id}] SESSION_ID sent to self-chat`);
+            } catch (err) {
+                console.error('[session] self-message failed:', err.message);
+                socket.emit('status', { message: `Note: could not DM the session to WhatsApp (${err.message}). Copy it from this page instead.` });
+            }
+
+            // Close the generator socket: two live connections on one session make
+            // WhatsApp log one of them out once the bot connects. Remove the keys
+            // from disk too — the portable string is all the bot needs.
+            await sleep(2500);
+            await killSocket(id);
+            await fs.remove(sessionPath).catch(() => {});
+            console.log(`[session ${id}] generator socket closed — handed off to bot`);
+        }
+
+        await spawn();
     }
 
     socket.on('start-session', (data) => {
-        startLinking(data).catch(err => {
-            socket.emit('error', { message: 'Internal error: ' + err.message });
-        });
+        queue = queue
+            .then(() => startLinking(data))
+            .catch((err) => {
+                console.error('[start-session] error:', err);
+                socket.emit('error', { message: 'Internal error: ' + err.message });
+            });
     });
 
-    socket.on('cancel-session', async () => {
-        if (cancelCurrent) {
-            cancelCurrent();
-            cancelCurrent = null;
-        }
-        if (currentSessionId) {
-            await killSocket(currentSessionId);
-            await deleteRecord(currentSessionId);
-            currentSessionId = null;
-        }
-        socket.emit('cancelled');
+    socket.on('cancel-session', () => {
+        queue = queue.then(async () => {
+            await teardown(current);
+            socket.emit('cancelled');
+        }).catch(() => {});
     });
 
     socket.on('disconnect', () => {
         console.log('client disconnected:', socket.id);
+        // Browser gone => nobody is waiting for this link; free the socket now.
+        // (An already-linked session is left alone so the bot can still fetch it.)
+        const attempt = current;
+        if (attempt && !attempt.linked) teardown(attempt).catch(() => {});
     });
 });
 
-// ---------- cleanup ----------
-
-setInterval(() => {
-    cleanupExpired().catch(err => console.error('cleanup error:', err.message));
+// ---------- lifecycle ----------
+const cleanupTimer = setInterval(() => {
+    cleanupExpired().catch((err) => console.error('cleanup error:', err.message));
 }, 10 * 60 * 1000);
+cleanupTimer.unref();
 
-httpServer.listen(PORT, () => {
-    console.log(`MEGA MIND SESSION SERVER running on port ${PORT}`);
-});
+function start(port = PORT) {
+    return new Promise((resolve) => {
+        httpServer.listen(port, () => {
+            console.log(`MEGA MIND SESSION SERVER running on port ${httpServer.address().port}`);
+            resolve(httpServer);
+        });
+    });
+}
 
-process.on('SIGINT', async () => {
-    for (const [, sock] of liveSockets) {
-        try { sock.end?.(undefined); } catch {}
-    }
+async function shutdown() {
+    for (const id of [...liveSockets.keys()]) await killSocket(id);
     httpServer.close(() => process.exit(0));
-});
+    setTimeout(() => process.exit(0), 3000).unref();
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err && err.message ? err.message : err));
+
+module.exports = { app, httpServer, io, start, _setBaileysForTests: (mock) => { B = mock; } };
+
+if (require.main === module) start();
